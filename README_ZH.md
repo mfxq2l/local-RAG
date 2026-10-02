@@ -5,6 +5,8 @@
 切块、嵌入、向量检索、稀疏检索、融合、重排、生成等环节均在本机执行，不依赖云端 API。
 当然,你可以往File文件夹里添加文件,比如说图片就放到File/image,以此类推
 
+# 国内开发者如果无法访问huggingface,可以去隔壁的魔搭看看[https://modelscope.cn/models]
+
 # 此项目使用deepseek制作,感谢deepseek
 ---
 
