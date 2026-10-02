@@ -1,0 +1,5424 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Local RAG · 本地知识库检索问答</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%97%88%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/index.css">
+</head>
+<body>
+<!-- 背景粒子层：纯装饰，置于所有内容之下（样式见 index.css 的 #bg-canvas） -->
+<canvas id="bg-canvas" aria-hidden="true"></canvas>
+
+<!-- ===================== 顶部栏 ===================== -->
+<header class="topbar">
+    <div class="brand">
+        <span class="logo">◈</span>
+        <span>Local RAG</span>
+        <span class="brand-sub" data-i18n="brand.sub">本地知识库检索问答</span>
+    </div>
+    <div class="status-bar">
+
+        <!-- 生成模型来源：本地离线 / 云端 API（保留在顶栏，属高频操作） -->
+        <div class="llm-switch" id="llm-switch" hidden>
+            <div class="seg" id="provider-seg" role="group">
+                <button type="button" class="seg-btn" data-provider="llama_cpp" id="provider-local-btn" data-i18n="provider.local">本地离线</button>
+                <button type="button" class="seg-btn" data-provider="openai" id="provider-cloud-btn" data-i18n="provider.cloud">云端 API</button>
+            </div>
+        </div>
+
+        <div class="model-picker" id="model-picker" hidden>
+            <label for="llm-select" data-i18n="model.label">生成模型</label>
+            <select id="llm-select"></select>
+        </div>
+
+        <div class="pill" id="pill-embedding"><span class="dot"></span><span data-i18n="pill.connecting">连接中…</span></div>
+        <div class="pill" id="pill-chunks"><span class="dot"></span><span>—</span></div>
+        <div class="pill" id="pill-llm"><span class="dot"></span><span>—</span></div>
+        <div class="pill" id="pill-vision" hidden><span class="dot"></span><span>—</span></div>
+    </div>
+</header>
+
+<main class="layout">
+
+    <!-- ===================== 左侧栏 ===================== -->
+    <aside class="sidebar">
+
+      <div class="side-scroll">
+
+        <!-- 索引面板 -->
+        <section class="panel">
+            <div class="panel-head" data-i18n="panel.index">索引状态</div>
+            <div class="panel-body">
+                <div class="kv"><span data-i18n="index.chunks">已索引 Chunk</span><strong id="indexed-count">—</strong></div>
+                <div class="kv"><span data-i18n="index.bm25">BM25 索引</span><strong id="bm25-state">—</strong></div>
+                <div class="kv"><span data-i18n="index.model">生成模型</span><strong id="llm-state">—</strong></div>
+                <div class="row-actions">
+                    <button id="index-btn" class="btn small" data-i18n="index.build">构建索引</button>
+                    <button id="rebuild-btn" class="btn small ghost" data-i18n="index.rebuild">重建索引</button>
+                </div>
+                <div id="index-progress" class="progress" hidden></div>
+            </div>
+        </section>
+
+        <!-- 文档清单（按类型分组） -->
+        <section class="panel">
+            <div class="panel-head"><span data-i18n="panel.docs">文档清单</span> <span class="badge" id="doc-count">0</span></div>
+            <div id="doc-pending" class="doc-pending" hidden></div>
+            <div id="doc-list" class="doc-list">
+                <div class="muted" data-i18n="common.loading">加载中…</div>
+            </div>
+        </section>
+
+        <!-- 会话列表（多轮对话） -->
+        <section class="panel">
+            <div class="panel-head"><span data-i18n="panel.convs">会话</span> <span class="badge" id="conv-count">0</span></div>
+            <div class="panel-head-actions">
+                <button type="button" class="btn small" id="conv-new-btn" data-i18n="conv.new">＋ 新对话</button>
+            </div>
+            <div id="conv-list" class="conv-list">
+                <div class="muted" data-i18n="common.loading">加载中…</div>
+            </div>
+        </section>
+
+        <!-- 文档详情（点击文档后出现） -->
+        <section id="doc-detail" class="panel doc-detail" hidden></section>
+
+      </div>
+
+      <!-- 设置入口：固定在侧栏底部 -->
+      <div class="side-foot">
+          <button type="button" class="btn small ghost" id="settings-btn">
+              <span class="settings-gear">⚙</span>
+              <span data-i18n="settings.open">设置</span>
+          </button>
+      </div>
+
+    </aside>
+
+    <!-- ===================== 主区域 ===================== -->
+    <section class="content" id="content">
+
+        <!-- 模式切换 -->
+        <div class="tabs">
+            <button class="tab active" data-mode="search" data-i18n="tab.search">检索</button>
+            <button class="tab" data-mode="ask" data-i18n="tab.ask">问答</button>
+            <button class="tab" data-mode="chat" data-i18n="tab.chat">对话</button>
+            <div class="tabs-spacer"></div>
+            <button type="button" class="btn small ghost" id="chat-new-btn" hidden data-i18n="conv.new">＋ 新对话</button>
+            <label class="opt" id="condense-opt" hidden data-i18n-title="opt.condenseTitle">
+                <input type="checkbox" id="use-condense" checked> <span data-i18n="opt.condense">改写追问</span>
+            </label>
+            <label class="opt" id="answer-mode-opt" hidden data-i18n-title="opt.modeTitle"><span data-i18n="opt.mode">档位</span>
+                <select id="answer-mode">
+                    <option value="precise" selected data-i18n="mode.precise">精确</option>
+                    <option value="fast" data-i18n="mode.fast">快速</option>
+                </select>
+            </label>
+            <label class="opt" id="stream-opt" hidden>
+                <input type="checkbox" id="use-stream" checked> <span data-i18n="opt.stream">流式输出</span>
+            </label>
+            <!-- 联网开关（对话页）。三处开关由 setWebEnabled() 联动 -->
+            <label class="opt" id="web-opt-chat" hidden data-i18n-title="opt.webTitle">
+                <input type="checkbox" id="use-web-chat"> <span data-i18n="opt.web">联网</span>
+            </label>
+        </div>
+
+        <!-- 查询栏（三种模式共用） -->
+        <div class="query-bar">
+            <input
+                id="query"
+                type="text"
+                data-i18n-placeholder="query.placeholder"
+                placeholder="输入问题，例如：nmap 的 -sS 参数是什么？"
+                autocomplete="off"
+                spellcheck="false"
+            >
+            <label class="opt"><input type="checkbox" id="use-bm25" checked> <span data-i18n="opt.bm25">BM25</span></label>
+            <label class="opt"><input type="checkbox" id="use-reranker" checked> <span data-i18n="opt.rerank">Rerank</span></label>
+            <label class="opt" data-i18n-title="opt.imagesTitle"><input type="checkbox" id="include-images" checked> <span data-i18n="opt.images">包含图片</span></label>
+            <!-- 联网开关（检索 / 问答页）。三处开关由 setWebEnabled() 联动 -->
+            <label class="opt" id="web-opt-search" data-i18n-title="opt.webTitle">
+                <input type="checkbox" id="use-web-search"> <span data-i18n="opt.web">联网</span>
+            </label>
+            <label class="opt" id="web-opt-ask" hidden data-i18n-title="opt.webTitle">
+                <input type="checkbox" id="use-web-ask"> <span data-i18n="opt.web">联网</span>
+            </label>
+            <label class="opt"><span data-i18n="opt.topk">TopK</span>
+                <select id="top-k">
+                    <option value="3">3</option>
+                    <option value="5" selected>5</option>
+                    <option value="8">8</option>
+                    <option value="10">10</option>
+                    <option value="15">15</option>
+                    <option value="20">20</option>
+                </select>
+            </label>
+            <button id="submit-btn" data-i18n="btn.search">搜索</button>
+            <button id="stop-btn" hidden data-i18n="btn.stop">停止</button>
+        </div>
+
+        <div id="notice" class="notice" hidden></div>
+        <div id="stats" class="stats"></div>
+        <div id="output" class="output"></div>
+
+        <details id="context-box" class="context-box" hidden>
+            <summary data-i18n="context.summary">拼接后的 Context</summary>
+            <pre id="context"></pre>
+        </details>
+
+        <!-- ============ 多轮对话 ============ -->
+        <section id="chat-panel" class="chat-panel" hidden>
+            <div id="chat-stream" class="chat-stream"></div>
+            <div class="chat-composer">
+                <textarea id="chat-input" rows="1"
+                          data-i18n-placeholder="chat.placeholder"
+                          placeholder="输入问题…（Enter 发送，Shift+Enter 换行）"
+                          spellcheck="false"></textarea>
+                <div class="composer-actions">
+                    <button type="button" class="btn" id="chat-send-btn" data-i18n="chat.send">发送</button>
+                    <button type="button" class="btn small ghost" id="chat-stop-btn" hidden data-i18n="btn.stop">停止</button>
+                </div>
+            </div>
+        </section>
+
+    </section>
+
+</main>
+
+<!-- ===================== 云端 API 配置模态框 ===================== -->
+<div class="modal-backdrop" id="cloud-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cloud-modal-title">
+        <div class="modal-head">
+            <span class="modal-title" id="cloud-modal-title" data-i18n="cloud.title">云端 API 配置</span>
+            <button type="button" class="modal-x" id="cloud-modal-close" aria-label="关闭">×</button>
+        </div>
+
+        <div class="modal-body">
+            <p class="modal-note" data-i18n="cloud.note">
+                任意 OpenAI 兼容端点均可：OpenAI、DeepSeek、Moonshot、通义、智谱、Ollama、LM Studio、vLLM 等。
+            </p>
+
+            <label class="field">
+                <span class="field-label">Base URL</span>
+                <input id="cloud-base-url" type="text" list="cloud-endpoint-list"
+                       placeholder="https://api.openai.com/v1" spellcheck="false" autocomplete="off">
+            </label>
+            <datalist id="cloud-endpoint-list"></datalist>
+            <div class="endpoint-chips" id="cloud-endpoint-chips"></div>
+
+            <label class="field">
+                <span class="field-label" data-i18n="cloud.model">模型名</span>
+                <input id="cloud-model" type="text" placeholder="gpt-4o-mini"
+                       spellcheck="false" autocomplete="off">
+            </label>
+
+            <label class="field">
+                <span class="field-label">API Key</span>
+                <input id="cloud-api-key" type="password" data-i18n-placeholder="cloud.apiKeyPlaceholder" placeholder="留空表示不修改"
+                       spellcheck="false" autocomplete="new-password">
+            </label>
+            <div class="field-hint" id="cloud-key-hint"></div>
+
+            <div class="field-row">
+                <label class="field">
+                    <span class="field-label">Temperature</span>
+                    <input id="cloud-temperature" type="number" min="0" max="2" step="0.05" value="0.2">
+                </label>
+                <label class="field">
+                    <span class="field-label">Max tokens</span>
+                    <input id="cloud-max-tokens" type="number" min="1" max="32768" step="64" value="1024">
+                </label>
+            </div>
+
+            <div class="inline-result" id="cloud-test-result" hidden></div>
+        </div>
+
+        <div class="modal-foot">
+            <button type="button" class="btn small ghost" id="cloud-test-btn" data-i18n="cloud.test">测试连接</button>
+            <button type="button" class="btn small ghost danger" id="cloud-clear-btn" data-i18n="cloud.delete">删除配置</button>
+            <span class="modal-spacer"></span>
+            <button type="button" class="btn small ghost" id="cloud-cancel-btn" data-i18n="cloud.cancel">取消</button>
+            <button type="button" class="btn small" id="cloud-save-btn" data-i18n="cloud.save">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===================== 设置面板 ===================== -->
+<div class="settings-backdrop" id="settings-backdrop" hidden>
+    <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+
+        <div class="settings-head">
+            <span class="settings-title" id="settings-title" data-i18n="settings.title">设置</span>
+            <span class="settings-head-spacer"></span>
+            <button type="button" class="btn small ghost" id="settings-reset-btn" data-i18n="settings.reset">恢复默认</button>
+            <button type="button" class="modal-x" id="settings-close" aria-label="关闭">×</button>
+        </div>
+
+        <div class="settings-main">
+
+            <nav class="settings-nav" id="settings-nav">
+                <button type="button" class="settings-nav-item active" data-pane="general" data-i18n="settings.nav.general">通用</button>
+                <button type="button" class="settings-nav-item" data-pane="model" data-i18n="settings.nav.model">模型</button>
+                <button type="button" class="settings-nav-item" data-pane="retrieval" data-i18n="settings.nav.retrieval">检索</button>
+                <button type="button" class="settings-nav-item" data-pane="web" data-i18n="settings.nav.web">联网搜索</button>
+                <button type="button" class="settings-nav-item" data-pane="chat" data-i18n="settings.nav.chat">对话</button>
+                <button type="button" class="settings-nav-item" data-pane="usage" data-i18n="settings.nav.usage">用量</button>
+                <button type="button" class="settings-nav-item" data-pane="about" data-i18n="settings.nav.about">关于</button>
+            </nav>
+
+            <div class="settings-body">
+
+                <!-- ---------------- 通用 ---------------- -->
+                <div class="settings-pane" data-pane="general">
+                    <div class="settings-group">
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.language">语言</div>
+                                <div class="settings-row-hint" data-i18n="settings.languageHint">界面语言。文档名、模型名与对话内容不受影响。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="settings-language">
+                                    <option value="zh">中文</option>
+                                    <option value="en">English</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.appearance">外观</div>
+                                <div class="settings-row-hint" data-i18n="settings.appearanceHint">选择「跟随系统」时会随操作系统主题实时切换。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <div class="theme-picker" id="theme-picker">
+                                    <button type="button" class="theme-btn" data-theme-value="light" data-i18n="settings.theme.light">浅色</button>
+                                    <button type="button" class="theme-btn active" data-theme-value="dark" data-i18n="settings.theme.dark">深色</button>
+                                    <button type="button" class="theme-btn" data-theme-value="system" data-i18n="settings.theme.system">跟随系统</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.fontSize">字号大小</div>
+                                <div class="settings-row-hint" data-i18n="settings.fontSizeHint">仅影响对话与回答内容的字号。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input id="settings-font-size" type="number" min="0" max="100" step="1" value="14">
+                                <span class="settings-unit">px</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ---------------- 模型 ---------------- -->
+                <div class="settings-pane" data-pane="model" hidden>
+                    <div class="settings-group">
+                        <div class="settings-group-title" data-i18n="settings.localModel">本地模型</div>
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.currentModel">当前生效模型</div>
+                                <div class="settings-row-hint" id="settings-model-hint">—</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="settings-model-select"></select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="settings-group">
+                        <div class="settings-group-title" data-i18n="settings.cloudApi">云端 API</div>
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.cloudState">连接配置</div>
+                                <div class="settings-row-hint" id="settings-cloud-hint">—</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <button type="button" class="btn small ghost" id="cloud-config-btn" data-i18n="settings.cloudConfig">配置</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ---------------- 检索 ---------------- -->
+                <div class="settings-pane" data-pane="retrieval" hidden>
+                    <div class="settings-group">
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="opt.topk">TopK</div>
+                                <div class="settings-row-hint" data-i18n="settings.topkHint">最终送入模型的参考片段数量。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="settings-top-k">
+                                    <option value="3">3</option>
+                                    <option value="5">5</option>
+                                    <option value="8">8</option>
+                                    <option value="10">10</option>
+                                    <option value="15">15</option>
+                                    <option value="20">20</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="opt.bm25">BM25</div>
+                                <div class="settings-row-hint" data-i18n="settings.bm25Hint">关键词检索，与向量检索融合（RRF）。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="checkbox" id="settings-use-bm25" checked>
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="opt.rerank">Rerank</div>
+                                <div class="settings-row-hint" data-i18n="settings.rerankHint">用向量重排候选，结果更准但略慢。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="checkbox" id="settings-use-reranker" checked>
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="opt.images">包含图片</div>
+                                <div class="settings-row-hint" data-i18n="settings.imagesHint">把图片描述一并纳入检索结果。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="checkbox" id="settings-include-images" checked>
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.minRelevance">相关性下限</div>
+                                <div class="settings-row-hint" data-i18n="settings.minRelevanceHint">低于此分数视为「没有相关资料」，改为用模型自身知识自然回答。设为 0 关闭过滤。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input id="settings-min-relevance" type="number" min="0" max="1" step="0.05" value="0.45">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ---------------- 联网搜索 ---------------- -->
+                <div class="settings-pane" data-pane="web" hidden>
+                    <div class="settings-group">
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.webEnabled">启用联网搜索</div>
+                                <div class="settings-row-hint" data-i18n="settings.webEnabledHint">把网页搜索结果追加到本地知识库之后，再由模型统一作答。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="checkbox" id="settings-web-enabled">
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.webProvider">搜索后端</div>
+                                <div class="settings-row-hint" data-i18n="settings.webProviderHint">默认 Bing，免密钥且国内可用。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="settings-web-provider"></select>
+                            </div>
+                        </div>
+
+                        <!-- 仅 needs_key 的后端可见 -->
+                        <div class="settings-row" id="settings-web-key-row" hidden>
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.webKey">API Key</div>
+                                <div class="settings-row-hint" data-i18n="settings.webKeyHint">留空表示保持已保存的 Key 不变。</div>
+                            </div>
+                            <div class="settings-row-control settings-web-key-control">
+                                <input type="password" id="settings-web-key" autocomplete="off"
+                                       data-i18n-placeholder="settings.webKeyPlaceholder" placeholder="粘贴 API Key">
+                                <button type="button" class="btn small ghost" id="settings-web-test-btn"
+                                        data-i18n="settings.webTest">测试连接</button>
+                            </div>
+                        </div>
+
+                        <!-- 仅 needs_url 的后端可见 -->
+                        <div class="settings-row" id="settings-web-url-row" hidden>
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.webUrl">SearXNG 地址</div>
+                                <div class="settings-row-hint" data-i18n="settings.webUrlHint">自建实例的地址，例如 http://localhost:8888。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="text" id="settings-web-url" autocomplete="off" spellcheck="false"
+                                       placeholder="http://localhost:8888">
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.webLimit">结果条数</div>
+                                <div class="settings-row-hint" data-i18n="settings.webLimitHint">每次最多取回多少条网页结果。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="number" id="settings-web-limit" min="1" max="15" step="1" value="5">
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.webFetch">抓取网页正文</div>
+                                <div class="settings-row-hint" data-i18n="settings.webFetchHint">打开后会真正下载网页并抽取正文，内容更完整但更慢；关闭则只用搜索摘要，明显更快。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="checkbox" id="settings-web-fetch" checked>
+                            </div>
+                        </div>
+
+                        <div class="settings-row" id="settings-web-fetch-top-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.webFetchTop">抓取条数</div>
+                                <div class="settings-row-hint" data-i18n="settings.webFetchTopHint">只抓取前 N 条，其余仅用摘要。设为 0 等于不抓正文。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="number" id="settings-web-fetch-top" min="0" max="8" step="1" value="3">
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.webProxy">走系统代理</div>
+                                <div class="settings-row-hint" data-i18n="settings.webProxyHint">国内直连拿不到部分站点。若本机已开代理，请保持开启；关闭后可能大量超时。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="checkbox" id="settings-web-proxy" checked>
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.webTimeout">超时</div>
+                                <div class="settings-row-hint" data-i18n="settings.webTimeoutHint">单次搜索或抓取页面的最长等待时间。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="number" id="settings-web-timeout" min="3" max="60" step="1" value="15">
+                                <span class="settings-unit" data-i18n="common.secondsUnit">秒</span>
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.webState">连接状态</div>
+                                <div class="settings-row-hint" data-i18n="settings.webStateHint">测试只发一次搜索请求，不会抓取页面。</div>
+                            </div>
+                            <div class="settings-row-control settings-web-actions">
+                                <button type="button" class="btn small ghost" id="settings-web-check-btn"
+                                        data-i18n="settings.webTest">测试连接</button>
+                                <button type="button" class="btn small ghost danger" id="settings-web-clear-btn"
+                                        data-i18n="settings.webClear">清除配置</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="settings-group" id="settings-web-result" hidden>
+                        <div class="settings-group-title" data-i18n="settings.webResult">测试结果</div>
+                        <div class="web-test-box" id="settings-web-result-body"></div>
+                    </div>
+                </div>
+
+                <!-- ---------------- 对话 ---------------- -->
+                <div class="settings-pane" data-pane="chat" hidden>
+                    <div class="settings-group">
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.defaultMode">默认档位</div>
+                                <div class="settings-row-hint" data-i18n="settings.defaultModeHint">快速档关闭思考过程，响应更快。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="settings-chat-mode">
+                                    <option value="fast" data-i18n="mode.fast">快速</option>
+                                    <option value="precise" data-i18n="mode.precise">精确</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="opt.condense">改写追问</div>
+                                <div class="settings-row-hint" data-i18n="settings.condenseHint">先用模型把「那第二点呢」这类追问改写成独立可检索的查询。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="checkbox" id="settings-condense" checked>
+                            </div>
+                        </div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="opt.stream">流式输出</div>
+                                <div class="settings-row-hint" data-i18n="settings.streamHint">逐字显示回答，无需等待整段生成完毕。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="checkbox" id="settings-stream" checked>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ---------------- 用量 ---------------- -->
+                <div class="settings-pane" data-pane="usage" hidden>
+                    <div class="settings-group">
+                        <div class="usage-cards" id="usage-cards"></div>
+
+                        <div class="settings-subtitle" data-i18n="settings.usageByModel">按模型</div>
+                        <div id="usage-by-model"></div>
+
+                        <div class="settings-subtitle" data-i18n="settings.usageByKind">按类型</div>
+                        <div id="usage-by-kind"></div>
+
+                        <div class="settings-subtitle" data-i18n="settings.usageByDay">最近 14 天</div>
+                        <div id="usage-by-day"></div>
+
+                        <div class="settings-row">
+                            <div class="settings-row-main">
+                                <div class="settings-row-name" data-i18n="settings.usageReset">重置统计</div>
+                                <div class="settings-row-hint" data-i18n="settings.usageResetHint">清空累计的调用次数与 token 计数，不可撤销。</div>
+                            </div>
+                            <div class="settings-row-control">
+                                <button type="button" class="btn small ghost danger" id="usage-reset-btn" data-i18n="settings.usageResetBtn">重置统计</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ---------------- 关于 ---------------- -->
+                <div class="settings-pane" data-pane="about" hidden>
+                    <div class="about-list" id="about-list"></div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ===================== 图片放大 ===================== -->
+<div class="lightbox" id="lightbox" hidden>
+    <img id="lightbox-img" alt="">
+    <div class="lightbox-cap" id="lightbox-cap"></div>
+</div>
+
+
+<script>
+"use strict";
+
+/* ==========================================================================
+ * 0. 基础工具
+ * ========================================================================== */
+
+const $ = (id) => document.getElementById(id);
+
+/** HTML 转义 —— 所有来自后端 / 用户的数据在插入 DOM 前都必须经过它 */
+function escapeHtml(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+    }[ch]));
+}
+
+/** 数字格式化（分数保留 4 位小数） */
+function fmtScore(n) {
+    const v = Number(n);
+    return Number.isFinite(v) ? v.toFixed(4) : "—";
+}
+
+/** 耗时格式化 */
+function fmtMs(ms) {
+    const v = Number(ms);
+    if (!Number.isFinite(v)) return "—";
+    return v >= 1000 ? (v / 1000).toFixed(2) + " s" : Math.round(v) + " ms";
+}
+
+/** 字节数格式化 */
+function fmtBytes(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return "—";
+    if (v < 1024) return v + " B";
+    if (v < 1024 * 1024) return (v / 1024).toFixed(1) + " KB";
+    return (v / 1024 / 1024).toFixed(2) + " MB";
+}
+
+/**
+ * 修改时间格式化。
+ *
+ * 后端给的是 **Unix 时间戳（秒，可能是小数）**，不是 ISO 字符串，
+ * 因此不能直接截字符串（那样会显示成一串数字）。
+ * 同时做一次容错：万一是毫秒时间戳或 ISO 字符串也能正确显示。
+ */
+function fmtDate(value) {
+    if (value === null || value === undefined || value === "") return "—";
+
+    let ms;
+
+    if (typeof value === "number") {
+        // 10 位左右按秒，13 位左右按毫秒
+        ms = value > 1e11 ? value : value * 1000;
+    } else {
+        const asNumber = Number(value);
+        if (Number.isFinite(asNumber) && String(value).trim() !== "") {
+            ms = asNumber > 1e11 ? asNumber : asNumber * 1000;
+        } else {
+            ms = Date.parse(value);
+        }
+    }
+
+    if (!Number.isFinite(ms)) return "—";
+
+    const d = new Date(ms);
+    if (Number.isNaN(d.getTime())) return "—";
+
+    const pad = (n) => String(n).padStart(2, "0");
+
+    return (
+        d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+        " " + pad(d.getHours()) + ":" + pad(d.getMinutes())
+    );
+}
+
+/**
+ * 统一的请求封装。
+ * 非 2xx 时抛出 Error，并把后端 `detail`（可能是字符串，也可能是对象）挂到 err 上，
+ * 便于调用方做降级展示（例如 /api/ask 的 503 会带 results / citations）。
+ */
+async function api(path, options = {}) {
+    const res = await fetch(path, options);
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (_) { data = null; }
+
+    if (!res.ok) {
+        const detail = data && data.detail !== undefined ? data.detail : null;
+        let message;
+        if (typeof detail === "string") message = detail;
+        else if (detail && typeof detail === "object" && detail.message) message = detail.message;
+        else if (data && data.message) message = data.message;
+        else message = "HTTP " + res.status;
+
+        const err = new Error(message);
+        err.status = res.status;
+        err.detail = detail;
+        err.data = data;
+        throw err;
+    }
+    return data;
+}
+
+function jsonPost(body) {
+    return {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    };
+}
+
+/* ---------------------------- 图片路径与判定 ---------------------------- */
+
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|bmp)$/i;
+
+/**
+ * 逐段编码图片相对路径。
+ *
+ * image_path 形如 `nmap-syn-scan-示例.png` 或 `sub/a b.png`。
+ * 整体 encodeURIComponent 会把分隔符 "/" 变成 "%2F"，后端按路径匹配就找不到文件；
+ * 因此必须**分段编码再拼回 "/"**。
+ */
+function encodeImagePath(imagePath) {
+    return String(imagePath == null ? "" : imagePath)
+        .split(/[\\/]+/)
+        .filter((seg) => seg && seg !== ".")
+        .map(encodeURIComponent)
+        .join("/");
+}
+
+/**
+ * 构造图片 URL。
+ * @param {string} imagePath 相对于 File/image 的路径
+ * @param {number} [w] 缩略图宽度；不传则返回原图
+ */
+function imageUrl(imagePath, w) {
+    const base = "/api/images/" + encodeImagePath(imagePath);
+    return w ? base + "?w=" + encodeURIComponent(w) : base;
+}
+
+/** 从 payload.metadata 取 image_path；没有则退回 file_name */
+function imagePathOf(payload, metadata) {
+    const meta = metadata || (payload && payload.metadata) || {};
+    return meta.image_path || meta.file_name || "";
+}
+
+/** 是否为图片类检索条目（后端约定 metadata.modality === "image"） */
+function isImagePayload(payload) {
+    if (!payload) return false;
+    const meta = payload.metadata || {};
+    return meta.modality === "image";
+}
+
+/**
+ * 引用对象是否为图片。
+ *
+ * 后端现在会在 citation 上直接给出 `is_image` / `modality` / `image_path`，
+ * 优先用这些**权威字段**；取不到时再退回两个可从 citation 本身拿到的信号：
+ *   1. 文件名是图片扩展名
+ *   2. preview 以「图片：」开头（图片 chunk 的正文固定是这个前缀）
+ */
+function isImageCitation(c) {
+    if (!c) return false;
+    if (c.is_image === true || c.modality === "image") return true;
+    if (c.image_path) return true;
+    const name = c.file_name || c.source || "";
+    if (IMAGE_EXT_RE.test(name)) return true;
+    return /^图片[：:]/.test(String(c.preview || ""));
+}
+
+/** 引用对应的图片路径：优先用后端给的 image_path，否则退回文件名 */
+function citationImagePath(c) {
+    if (!c) return "";
+    return c.image_path || c.file_name || "";
+}
+
+/** 图片描述正文：去掉首行「图片：<文件名>」，因为文件名已单独展示 */
+function imageCaptionText(content) {
+    const text = String(content == null ? "" : content);
+    return text.replace(/^图片[：:][^\n]*\n?/, "").trim();
+}
+
+/* ---------------------------- 提示 / 统计 ---------------------------- */
+
+function showNotice(text, kind = "info") {
+    const el = $("notice");
+    el.hidden = false;
+    el.className = "notice " + kind;
+    el.textContent = text;
+}
+
+function clearNotice() {
+    const el = $("notice");
+    el.hidden = true;
+    el.textContent = "";
+}
+
+function renderStats(stats, extra) {
+    const box = $("stats");
+    const s = stats || {};
+    const chips = [];
+
+    if (s.dense_hits !== undefined) chips.push(["Dense", s.dense_hits]);
+    if (s.bm25_hits !== undefined) chips.push(["BM25", s.bm25_hits]);
+    if (s.candidates !== undefined) chips.push(["候选", s.candidates]);
+    if (s.final !== undefined) chips.push(["最终", s.final]);
+    if (s.documents !== undefined) chips.push(["文档", s.documents]);
+    if (s.chunks !== undefined) chips.push(["Chunk", s.chunks]);
+    if (s.total_chars !== undefined) chips.push(["总字符", s.total_chars]);
+    if (s.average_chunk_length !== undefined) chips.push(["平均长度", Math.round(s.average_chunk_length)]);
+    if (s.elapsed_ms !== undefined) chips.push(["耗时", fmtMs(s.elapsed_ms)]);
+    if (s.use_bm25 !== undefined) chips.push(["BM25", s.use_bm25 ? "开" : "关"]);
+    if (s.use_reranker !== undefined) chips.push(["Rerank", s.use_reranker ? "开" : "关"]);
+
+    // 联网检索：把「本地 / 网页」分开计数，一眼看出各占多少
+    if (s.use_web !== undefined) {
+        chips.push([t("opt.web"), s.use_web ? t("common.on") : t("common.off")]);
+    }
+    if (s.local !== undefined) chips.push([t("web.chipLocal"), s.local]);
+    if (s.web !== undefined) chips.push([t("web.chipWeb"), s.web]);
+
+    if (extra) chips.push(...extra);
+
+    if (!chips.length) { box.innerHTML = ""; return; }
+    box.innerHTML = chips
+        .map(([k, v]) => `<span class="chip">${escapeHtml(k)} <b>${escapeHtml(v)}</b></span>`)
+        .join("");
+}
+
+function setContext(text) {
+    const box = $("context-box");
+    const pre = $("context");
+    if (text && String(text).trim()) {
+        pre.textContent = text;
+        box.hidden = false;
+    } else {
+        pre.textContent = "";
+        box.hidden = true;
+        box.open = false;
+    }
+}
+
+/* ==========================================================================
+ * 1. 全局状态
+ * ========================================================================== */
+
+const state = {
+    mode: "search",       // search | ask | chat
+    busy: false,          // 是否有请求在进行
+    abort: null,          // 流式请求的 AbortController
+    indexTimer: null,     // 索引状态轮询定时器
+    indexTicker: null,    // 索引进度「已用时间」秒表定时器
+    indexStartedAt: null, // 索引开始时间戳（用于显示已用时间）
+    indexRebuild: null,   // true=重建 false=增量 null=未知（页面打开时已在跑）
+    answerRaw: "",        // 流式答案原始文本
+    reasoningRaw: "",     // 思考过程原始文本
+    streaming: false,     // 答案是否仍在流式输出
+    paintPending: false,  // 是否已排入下一帧渲染
+    citations: [],        // 当前引用列表（含完整正文）
+    contentByChunk: {},   // chunk_id -> 完整正文（来自 results）
+    payloadByChunk: {},   // chunk_id -> 完整 payload（用于引用卡片识别图片）
+    citeFullText: {},     // "作用域:序号" -> 完整正文（供「展开片段」取用）
+
+    provider: "",         // 当前生成模型来源：llama_cpp | openai
+    localModelCount: 0,   // 本地可用模型数量（决定下拉框是否显示）
+    cloudKeyMask: "",     // 已保存 API Key 的掩码（仅掩码，绝不含明文）
+    lightboxOpen: false,
+
+    lastDocs: null,           // 最近一次 /api/documents 响应
+    collapsedGroups: new Set(), // 已折叠的分组 kind
+    activeDocKey: "",         // 当前选中项，形如 "markdown:nmap.md"
+
+    // ---- 多轮对话 ----
+    conversationId: null,   // 当前会话 ID；null 表示尚未建立（下一条消息会自动新建）
+    conversations: [],      // 会话列表（不含轮次明细）
+    condense: true,         // 是否用模型改写追问
+    chatTurnCount: 0,       // 当前已渲染的轮次数（用于生成引用作用域）
+    chatStreaming: false,   // 对话是否正在流式输出
+    chatAbort: null,        // 对话流式请求的 AbortController
+    chatBusy: false,        // 对话请求进行中
+    chatPaintPending: false,// 对话答案是否已排入下一帧渲染
+};
+
+/* ==========================================================================
+ * 2. 顶部健康状态
+ * ========================================================================== */
+
+function setPill(id, kind, html, title) {
+    const el = $(id);
+    el.className = "pill" + (kind ? " " + kind : "");
+    el.innerHTML = '<span class="dot"></span><span>' + html + "</span>";
+    el.title = title || "";
+}
+
+/* ==========================================================================
+ * 2b. 生成模型选择器
+ *
+ * 同一时刻只会有一个对话模型驻留显存，因此这里的切换是「停掉旧服务 →
+ * 记录新选择 → 下次提问时懒加载」，而不是每个请求各带一个模型。
+ * ========================================================================== */
+
+async function loadModels() {
+    let data;
+    try {
+        data = await api("/api/llm/models");
+    } catch (err) {
+        state.localModelCount = 0;
+        applyProviderUi();
+        return;
+    }
+
+    const models = (data && data.models) || [];
+    const select = $("llm-select");
+    const activeFile = (data.active && data.active.file_name) || "";
+
+    state.localModelCount = models.length;
+
+    if (!models.length) {
+        applyProviderUi();
+        return;
+    }
+
+    select.innerHTML = "";
+    models.forEach((m) => {
+        const opt = document.createElement("option");
+        opt.value = m.file_name;
+        // 显存不够的模型也能选，但会退回 CPU 推理，这里明确标注
+        opt.textContent = m.label + (m.fits_vram ? "" : " ⚠CPU");
+        opt.title = [
+            m.file_name,
+            "类型：" + (m.kind_label || m.kind || "?"),
+            "权重 " + m.size_gb + " GB + KV " + m.kv_cache_gb + " GB = " + m.total_gb + " GB",
+            m.fits_vram ? "显存可容纳" : "显存不足，将退回 CPU 推理",
+        ].join("\n");
+        if (m.file_name === activeFile) opt.selected = true;
+        select.appendChild(opt);
+    });
+
+    select.dataset.active = activeFile;
+
+    // 设置面板里的模型下拉与顶栏共用同一份数据
+    syncModelSelectors(
+        models.map((m) => ({
+            file: m.file_name,
+            label: m.label + (m.fits_vram ? "" : " ⚠CPU"),
+        })),
+        activeFile
+    );
+
+    applyProviderUi();
+}
+
+async function switchModel(fileName) {
+    const select = $("llm-select");
+    const previous = select.dataset.active || "";
+
+    if (!fileName || fileName === previous) return;
+
+    select.disabled = true;
+    showNotice("正在切换模型…（会先停掉当前模型以释放显存）", "info");
+
+    try {
+        const res = await api("/api/llm/select", jsonPost({ model: fileName }));
+
+        select.dataset.active = fileName;
+        showNotice(
+            (res && res.message) || "已切换模型，下次提问时生效。",
+            "ok"
+        );
+
+        // 刷新状态胶囊与左侧面板
+        await refreshHealth(true);
+
+    } catch (err) {
+        // 失败要回滚下拉框，否则界面会显示一个并未生效的选择
+        select.value = previous;
+        showNotice("切换模型失败：" + (err.message || err), "err");
+
+    } finally {
+        select.disabled = false;
+    }
+}
+
+/* ==========================================================================
+ * 2c. 生成模型来源：本地离线 / 云端 API
+ *
+ * 同一时刻只用一种来源。切到「云端 API」时隐藏本地模型下拉、显示「配置」按钮；
+ * 后端在云端未配置完整时会拒绝切换（400），此时自动弹出配置框。
+ * ========================================================================== */
+
+/** 让两个分段按钮反映当前来源，并切换下拉框 / 配置按钮的可见性 */
+function applyProviderUi() {
+    const active = state.provider || "llama_cpp";
+
+    document.querySelectorAll("#provider-seg .seg-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.provider === active);
+    });
+
+    const cloudBtn = $("cloud-config-btn");
+    const picker = $("model-picker");
+
+    if (active === "openai") {
+        cloudBtn.hidden = false;
+        picker.hidden = true;
+    } else {
+        // 云端配置入口已移入设置面板，始终可用，不随当前来源隐藏
+        cloudBtn.hidden = false;
+        // 本地模型下拉的可见性由 loadModels() 决定（没有模型时保持隐藏）
+        if (state.localModelCount > 0) picker.hidden = false;
+    }
+}
+
+/** 拉取两种来源的状态，初始化切换控件 */
+async function loadProviders() {
+    let data;
+    try {
+        data = await api("/api/llm/providers");
+    } catch (_) {
+        // 后端尚未提供该接口时静默隐藏，不影响原有功能
+        $("llm-switch").hidden = true;
+        return;
+    }
+
+    const providers = (data && data.providers) || [];
+    if (!providers.length) {
+        $("llm-switch").hidden = true;
+        return;
+    }
+
+    state.provider = (data && data.active) || "llama_cpp";
+
+    // 云端未配置时给分段按钮加个提示色，并把原因挂到 title
+    providers.forEach((p) => {
+        const btn = document.querySelector(
+            '#provider-seg .seg-btn[data-provider="' + p.id + '"]'
+        );
+        if (!btn) return;
+        btn.classList.toggle("unavailable", !p.available);
+        btn.title = [
+            p.label + (p.description ? "（" + p.description + "）" : ""),
+            p.available ? (p.detail || "可用") : (p.reason || "不可用"),
+        ].join("\n");
+    });
+
+    $("llm-switch").hidden = false;
+    applyProviderUi();
+}
+
+/** 切换来源 */
+async function setProvider(id) {
+    if (!id || id === state.provider) return;
+
+    const buttons = document.querySelectorAll("#provider-seg .seg-btn");
+    buttons.forEach((b) => { b.disabled = true; });
+
+    try {
+        const res = await api("/api/llm/provider", jsonPost({ provider: id }));
+
+        state.provider = (res && res.provider) || id;
+        applyProviderUi();
+        showNotice((res && res.message) || "已切换生成模型来源。", "ok");
+
+        await refreshHealth(true);
+        await loadProviders();
+
+    } catch (err) {
+        // 云端未配置完整时后端会返回 400，此时直接把配置框弹出来
+        const msg = err.message || String(err);
+        showNotice("切换失败：" + msg, "err");
+        if (id === "openai") openCloudModal();
+        applyProviderUi();
+    } finally {
+        buttons.forEach((b) => { b.disabled = false; });
+    }
+}
+
+/* ------------------------------ 云端配置 ------------------------------ */
+
+function setCloudResult(ok, message) {
+    const box = $("cloud-test-result");
+    box.hidden = false;
+    box.className = "inline-result " + (ok ? "ok" : "err");
+    box.textContent = message;
+}
+
+function clearCloudResult() {
+    const box = $("cloud-test-result");
+    box.hidden = true;
+    box.textContent = "";
+    box.className = "inline-result";
+}
+
+/** 用后端返回的 known_endpoints 生成快捷选项（datalist + 芯片） */
+function fillEndpointHints(known) {
+    const datalist = $("cloud-endpoint-list");
+    const chips = $("cloud-endpoint-chips");
+    datalist.innerHTML = "";
+    chips.innerHTML = "";
+
+    const entries = Object.entries(known || {});
+    if (!entries.length) return;
+
+    entries.forEach(([label, url]) => {
+        const opt = document.createElement("option");
+        opt.value = url;
+        opt.label = label;
+        datalist.appendChild(opt);
+
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "endpoint-chip";
+        chip.textContent = label;
+        chip.title = url;
+        chip.addEventListener("click", () => {
+            $("cloud-base-url").value = url;
+        });
+        chips.appendChild(chip);
+    });
+
+    // 未配置时用第一个已知端点做 placeholder
+    const urlInput = $("cloud-base-url");
+    if (urlInput && !urlInput.value) {
+        urlInput.placeholder = entries[0][1];
+    }
+}
+
+/** 读取云端配置并填充表单（**只使用掩码，不接触明文 key**） */
+async function loadCloudConfig() {
+    let cfg;
+    try {
+        cfg = await api("/api/llm/cloud");
+    } catch (_) {
+        return null;
+    }
+
+    $("cloud-base-url").value = cfg.base_url || "";
+    $("cloud-model").value = cfg.model || "";
+    $("cloud-temperature").value =
+        cfg.temperature != null ? cfg.temperature : 0.2;
+    $("cloud-max-tokens").value =
+        cfg.max_tokens != null ? cfg.max_tokens : 1024;
+
+    // API Key 输入框永远为空；只把掩码放进 placeholder 与提示文案
+    const keyInput = $("cloud-api-key");
+    keyInput.value = "";
+    state.cloudKeyMask = cfg.api_key_masked || "";
+
+    const hint = $("cloud-key-hint");
+    if (cfg.has_api_key) {
+        keyInput.placeholder = cfg.api_key_masked + "（留空表示不修改）";
+        hint.textContent = "已保存：" + cfg.api_key_masked + "　留空即保持该 Key 不变。";
+    } else {
+        keyInput.placeholder = "sk-…";
+        hint.textContent = "尚未保存 API Key。";
+    }
+
+    fillEndpointHints(cfg.known_endpoints);
+    clearCloudResult();
+    return cfg;
+}
+
+async function openCloudModal() {
+    $("cloud-modal").hidden = false;
+    document.body.classList.add("modal-open");
+    await loadCloudConfig();
+    $("cloud-base-url").focus();
+}
+
+function closeCloudModal() {
+    $("cloud-modal").hidden = true;
+    document.body.classList.remove("modal-open");
+    clearCloudResult();
+    // 关闭即清空密钥输入，避免明文残留在 DOM 里
+    $("cloud-api-key").value = "";
+}
+
+/** 从表单读取配置；api_key 为空串表示「不修改」 */
+function readCloudForm() {
+    const temperature = Number($("cloud-temperature").value);
+    const maxTokens = Number($("cloud-max-tokens").value);
+
+    return {
+        base_url: $("cloud-base-url").value.trim(),
+        model: $("cloud-model").value.trim(),
+        api_key: $("cloud-api-key").value,
+        temperature: Number.isFinite(temperature) ? temperature : 0.2,
+        max_tokens: Number.isFinite(maxTokens) && maxTokens > 0
+            ? Math.round(maxTokens)
+            : 1024,
+    };
+}
+
+async function testCloud() {
+    const btn = $("cloud-test-btn");
+    btn.disabled = true;
+    btn.textContent = "测试中…";
+    setCloudResult(true, "正在连接…");
+
+    try {
+        const body = readCloudForm();
+        const res = await api("/api/llm/cloud/test", jsonPost(body));
+
+        if (res && res.ok) {
+            const models = (res.models || []).slice(0, 8);
+            setCloudResult(
+                true,
+                (res.message || "连接成功") +
+                (models.length ? "　可用模型：" + models.join("、") : "")
+            );
+        } else {
+            setCloudResult(false, (res && res.message) || "连接失败");
+        }
+    } catch (err) {
+        setCloudResult(false, "连接失败：" + (err.message || err));
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "测试连接";
+    }
+}
+
+async function saveCloud() {
+    const btn = $("cloud-save-btn");
+    btn.disabled = true;
+    btn.textContent = "保存中…";
+
+    try {
+        const body = readCloudForm();
+        const res = await api("/api/llm/cloud", jsonPost(body));
+
+        closeCloudModal();
+        showNotice(
+            res && res.configured
+                ? "云端配置已保存：" + (res.model || "") + " @ " + (res.base_url || "")
+                : "已保存，但配置仍不完整（需要 Base URL、模型名与 API Key）。",
+            res && res.configured ? "ok" : "warn"
+        );
+
+        await loadProviders();
+        await refreshHealth(true);
+
+    } catch (err) {
+        setCloudResult(false, "保存失败：" + (err.message || err));
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "保存";
+    }
+}
+
+async function clearCloud() {
+    if (!confirm(t("cloud.deleteConfirm"))) return;
+
+    try {
+        const res = await api("/api/llm/cloud/clear", jsonPost({}));
+        closeCloudModal();
+        showNotice((res && res.message) || "已删除云端配置。", "info");
+        await loadProviders();
+        await refreshHealth(true);
+    } catch (err) {
+        setCloudResult(false, "删除失败：" + (err.message || err));
+    }
+}
+
+/* ------------------------------ 图片放大 ------------------------------ */
+
+function openLightbox(src, caption) {
+    // 没有地址就不打开，否则 img.src="" 会去请求当前页面
+    if (!src) return;
+
+    const box = $("lightbox");
+    const img = $("lightbox-img");
+    img.src = src;
+    img.alt = caption || "";
+    $("lightbox-cap").textContent = caption || "";
+    box.hidden = false;
+    state.lightboxOpen = true;
+}
+
+function closeLightbox() {
+    const box = $("lightbox");
+    box.hidden = true;
+    $("lightbox-img").src = "";
+    state.lightboxOpen = false;
+}
+
+async function refreshHealth(silent) {
+    try {
+        const d = await api("/api/health");
+        state.health = d;
+
+        // embedding 模型
+        const embedOk = d.embedding_model_exists !== false;
+        setPill(
+            "pill-embedding",
+            embedOk ? "ok" : "err",
+            "Embedding <strong>" + escapeHtml(d.embedding_model || "未知") + "</strong>",
+            embedOk ? t("pill.embeddingReady") : t("pill.embeddingMissing")
+        );
+
+        // chunk 数 + 索引态
+        const chunks = Number(d.indexed_chunks || 0);
+        const indexing = !!d.indexing;
+        setPill(
+            "pill-chunks",
+            indexing ? "warn" : (chunks > 0 ? "ok" : "warn"),
+            indexing
+                ? t("pill.indexing")
+                : t("pill.indexedPrefix") + " <strong>" + chunks + "</strong> chunk" +
+                  (d.bm25_index_exists ? " · BM25" : ""),
+            indexing ? t("pill.indexingTitle")
+                : "BM25 " + (d.bm25_index_exists ? t("index.ready") : t("index.missing"))
+        );
+
+        // LLM
+        const llmOk = !!d.llm_available;
+        setPill(
+            "pill-llm",
+            llmOk ? "ok" : "warn",
+            llmOk
+                ? "LLM <strong>" + escapeHtml(d.llm_model || "已就绪") + "</strong>"
+                : t("pill.llmUnavailable"),
+            llmOk ? t("pill.llmReady")
+                : (d.llm_reason || t("pill.llmUnavailableTitle"))
+        );
+
+        // 视觉模型（图片描述）—— 仅在检测到图片时才显示这个胶囊
+        const imgChunks = Number(d.image_chunks || 0);
+        const visionOk = !!d.vision_available;
+        const visionPill = $("pill-vision");
+
+        if (imgChunks > 0) {
+            visionPill.hidden = false;
+            setPill(
+                "pill-vision",
+                visionOk ? "ok" : "warn",
+                visionOk
+                    ? "视觉 <strong>" + escapeHtml(d.vision_model || "已就绪") + "</strong>"
+                    : t("pill.vlmUnavailable"),
+                visionOk
+                    ? t("pill.vlmReadyTitle") + "（" + imgChunks + "）"
+                    : (d.vision_reason || t("pill.vlmMissingTitle")) +
+                      "（已索引 " + imgChunks + " 张图片）"
+            );
+        } else {
+            visionPill.hidden = true;
+        }
+
+        // 左侧索引面板
+        $("indexed-count").textContent = chunks;
+        const bm = $("bm25-state");
+        bm.textContent = d.bm25_index_exists
+            ? t("index.ready") : t("index.missing");
+        bm.className = d.bm25_index_exists ? "ok" : "warn";
+
+        const llm = $("llm-state");
+        llm.textContent = llmOk
+            ? (d.llm_model || t("common.available")) : t("common.unavailable");
+        llm.className = llmOk ? "ok" : "err";
+        llm.title = llmOk ? "" : (d.llm_reason || "");
+
+        if (!llmOk && !silent) {
+            showNotice(t("pill.llmUnavailable") + "：" + (d.llm_reason || "") +
+                t("notice.llmDegraded"), "warn");
+        }
+        return d;
+    } catch (err) {
+        setPill("pill-embedding", "err", "无法连接到后端", String(err.message || err));
+        setPill("pill-chunks", "err", "—");
+        setPill("pill-llm", "err", "—");
+        $("indexed-count").textContent = "—";
+        if (!silent) showNotice("无法连接到后端服务：" + (err.message || err), "err");
+        return null;
+    }
+}
+
+/* ==========================================================================
+ * 3. 索引面板
+ * ========================================================================== */
+
+function setIndexButtons(disabled) {
+    $("index-btn").disabled = disabled;
+    $("rebuild-btn").disabled = disabled;
+}
+
+function showIndexProgress(text, withBar) {
+    const el = $("index-progress");
+    el.hidden = false;
+    el.innerHTML = escapeHtml(text) + (withBar ? '<div class="bar"></div>' : "");
+}
+
+/* ------------------------- 索引进度：秒表与文案 ------------------------- */
+
+/** 索引已用秒数 */
+function indexElapsedSeconds() {
+    if (!state.indexStartedAt) return 0;
+    return Math.max(0, Math.round((Date.now() - state.indexStartedAt) / 1000));
+}
+
+/**
+ * 索引进度文案。
+ *
+ * 重建场景下**绝不能**显示「已写入 0 chunk」：重建会先清空集合，而写入是在
+ * 全部 embedding 完成后**一次性**执行，中途轮询到的计数一直是 0 —— 用户会
+ * 以为卡住或出错。因此这里改为显示**已用时间**，并说明计数为何为 0。
+ */
+function indexProgressMessage(extra) {
+    const elapsed = indexElapsedSeconds();
+    let head;
+    let note;
+
+    if (state.indexRebuild === true) {
+        head = t("index.rebuilding") + elapsed + t("common.seconds");
+        note = t("index.noteRebuild");
+    } else if (state.indexRebuild === false) {
+        head = t("index.building") + elapsed + t("common.seconds");
+        note = t("index.noteFirst");
+    } else {
+        // 页面打开时后台已在跑，无从判断是构建还是重建
+        head = t("index.buildingBackground");
+        note = "重建会先清空集合，完成后一次性写入";
+    }
+
+    let message = head + "（" + note;
+    if (extra) message += "，" + extra;
+    return message + "）";
+}
+
+/** 每秒刷新一次「已用时间」 */
+function startIndexTicker() {
+    stopIndexTicker();
+    state.indexTicker = setInterval(() => {
+        if (!state.indexStartedAt) return;
+        showIndexProgress(indexProgressMessage(), true);
+    }, 1000);
+}
+
+function stopIndexTicker() {
+    if (state.indexTicker) {
+        clearInterval(state.indexTicker);
+        state.indexTicker = null;
+    }
+}
+
+/** 轮询 /api/index/status，直到 indexing == false */
+function startIndexPolling() {
+    if (state.indexTimer) return;
+    state.indexTimer = setInterval(async () => {
+        try {
+            const s = await api("/api/index/status");
+            if (s.indexing) {
+                setIndexButtons(true);
+
+                // 只有「增量构建」时 chunk 计数才有意义；
+                // 重建期间计数恒为 0，显示它会造成误解。
+                const extra =
+                    state.indexRebuild === false && (s.indexed_chunks || 0) > 0
+                        ? "已写入 " + s.indexed_chunks + " chunk"
+                        : "";
+
+                showIndexProgress(indexProgressMessage(extra), true);
+            } else {
+                stopIndexPolling();
+                setIndexButtons(false);
+                const last = s.last_result;
+                if (last) {
+                    showIndexProgress(
+                        "最近一次：写入 " + (last.indexed ?? "?") + " / " + (last.chunks ?? "?") +
+                        " chunk，耗时 " + fmtMs(last.elapsed_ms)
+                    );
+                } else if (s.last_error) {
+                    showIndexProgress("最近一次失败：" + s.last_error);
+                } else {
+                    $("index-progress").hidden = true;
+                }
+                await refreshHealth(true);
+                loadDocuments();
+            }
+        } catch (_) { /* 轮询失败忽略，下轮重试 */ }
+    }, 1500);
+}
+
+function stopIndexPolling() {
+    if (state.indexTimer) {
+        clearInterval(state.indexTimer);
+        state.indexTimer = null;
+    }
+    stopIndexTicker();
+    state.indexStartedAt = null;
+    state.indexRebuild = null;
+}
+
+async function buildIndex(rebuild) {
+    setIndexButtons(true);
+    clearNotice();
+
+    // 秒表起点：用于显示「已用 N 秒」
+    state.indexRebuild = !!rebuild;
+    state.indexStartedAt = Date.now();
+
+    showIndexProgress(indexProgressMessage(), true);
+    startIndexTicker();
+
+    // 立刻开始轮询，让用户看到后台进度
+    startIndexPolling();
+
+    try {
+        const d = await api("/api/index", jsonPost({ rebuild: !!rebuild, prune: true }));
+        stopIndexPolling();
+
+        const parts = [
+            "写入 " + (d.indexed ?? "?") + " / " + (d.chunks ?? "?") + " chunk",
+        ];
+        if (typeof d.text_chunks === "number") parts.push("文本 " + d.text_chunks);
+        if (typeof d.image_chunks === "number") parts.push("图片 " + d.image_chunks);
+        parts.push("集合 " + (d.collection || "—"));
+        parts.push(fmtMs(d.elapsed_ms));
+
+        showIndexProgress(
+            (rebuild ? "重建完成：" : "构建完成：") + parts.join(" · ")
+        );
+        showNotice(
+            (rebuild ? "索引已重建" : "索引已更新") +
+            "：共 " + (d.indexed ?? "?") + " 个 chunk" +
+            (d.pruned ? "，清理 " + d.pruned + " 个旧向量" : "") + "。",
+            "ok"
+        );
+        await refreshHealth(true);
+        loadDocuments();
+        clearOutput();
+    } catch (err) {
+        stopIndexPolling();
+        if (err.status === 409) {
+            // 已有索引任务在执行：继续轮询等它结束（不知是构建还是重建）
+            showNotice(err.message, "warn");
+            state.indexStartedAt = Date.now();
+            state.indexRebuild = null;
+            showIndexProgress(indexProgressMessage(), true);
+            startIndexTicker();
+            startIndexPolling();
+        } else {
+            showIndexProgress("构建失败：" + (err.message || err));
+            showNotice("索引构建失败：" + (err.message || err), "err");
+            setIndexButtons(false);
+        }
+    }
+}
+
+/* ==========================================================================
+ * 4. 文档清单（按类型分组）/ 详情 / 切块预览
+ *
+ * 后端 /api/documents 返回：
+ *   { total, pending_index, groups: [{kind,label,count,indexed,documents:[...]}] }
+ * 分组顺序固定 markdown → pdf → image → text。
+ *
+ * 图片条目自带 url / thumb_url（后端**已逐段编码好**），直接用作 src，
+ * 不要再自己拼或再编码一次，否则中文与空格会被二次编码。
+ * ========================================================================== */
+
+/** 各分组的空态文案 */
+const DOC_EMPTY_TEXT = {
+    markdown: "暂无 Markdown 文件",
+    pdf: "暂无 PDF 文件",
+    image: "暂无图片",
+    text: "暂无文本文件",
+};
+
+/** 条目唯一键：kind + 路径，用于选中态比对（比 title 稳妥） */
+function docKey(doc) {
+    return (doc.kind || "file") + ":" + (doc.file || doc.name || "");
+}
+
+/** 设置当前选中项并同步高亮 */
+function setActiveDoc(key) {
+    state.activeDocKey = key || "";
+    document.querySelectorAll(".doc-item").forEach((el) => {
+        el.classList.toggle("active", el.dataset.key === state.activeDocKey);
+    });
+}
+
+/**
+ * 顶部「尚未索引」提示。
+ *
+ * 新放进 File/ 的文件（尤其图片）在重建索引之前**搜不到**，
+ * 这一点必须在界面上看得见，否则用户会以为是检索坏了。
+ */
+function renderPendingNotice(count) {
+    const box = $("doc-pending");
+    const n = Number(count) || 0;
+
+    if (n <= 0) {
+        box.hidden = true;
+        box.innerHTML = "";
+        return;
+    }
+
+    box.hidden = false;
+    box.innerHTML =
+        '<span class="doc-pending-text">' +
+            '<strong>' + n + "</strong>" + escapeHtml(t("doc.pending")) + "，" +
+        "重建索引后才会被检索到</span>" +
+        '<button type="button" class="btn small" id="doc-pending-build">' +
+            escapeHtml(t("doc.pendingBuild")) + "</button>";
+
+    const btn = $("doc-pending-build");
+    if (btn) btn.addEventListener("click", () => buildIndex(false));
+}
+
+/** 点击条目：按类型分流 */
+function selectDoc(doc) {
+    setActiveDoc(docKey(doc));
+
+    if (doc.kind === "image") {
+        // /api/documents/{file} 只支持 Markdown，图片直接开灯箱看原图
+        openLightbox(doc.url || doc.thumb_url || "", doc.name || doc.file);
+        return;
+    }
+
+    if (doc.kind === "markdown") {
+        openDocument(doc.file);
+        return;
+    }
+
+    // pdf / text 暂无预览能力，明确告知而不是静默失败
+    showNotice(
+        "暂不支持预览 " + (doc.name || doc.file) +
+        "（当前只有 Markdown 支持详情预览）。",
+        "warn"
+    );
+}
+
+/** 单个条目 */
+function buildDocItem(doc) {
+    const key = docKey(doc);
+    const isImage = doc.kind === "image";
+
+    const el = document.createElement("div");
+    el.className =
+        "doc-item" +
+        (isImage ? " doc-item-image" : "") +
+        (doc.indexed ? "" : " doc-item-pending") +
+        (key === state.activeDocKey ? " active" : "");
+    el.dataset.key = key;
+    el.title = doc.file || doc.name || "";
+
+    // 缩略图：后端已编码，直接使用；为空时给占位块，
+    // 避免 img.src="" 去请求当前页面本身
+    let thumbHtml = "";
+    if (isImage) {
+        const src = doc.thumb_url || doc.url || "";
+        thumbHtml = src
+            ? '<img class="doc-thumb" src="' + escapeHtml(src) + '"' +
+              ' alt="" loading="lazy" decoding="async"' +
+              ' onerror="this.style.visibility=\'hidden\';">'
+            : '<span class="doc-thumb doc-thumb-empty" aria-hidden="true"></span>';
+    }
+
+    const badge = doc.indexed ? "" : '<span class="tag-pending">未索引</span>';
+
+    el.innerHTML =
+        thumbHtml +
+        '<span class="doc-body">' +
+        '<span class="name">' + escapeHtml(doc.name || doc.file) + "</span>" +
+        '<span class="meta">' + escapeHtml(fmtBytes(doc.size)) +
+        " · " + escapeHtml(fmtDate(doc.modified_at)) + "</span>" +
+        "</span>" +
+        badge;
+
+    el.addEventListener("click", () => selectDoc(doc));
+    return el;
+}
+
+/** 一个可折叠分组 */
+function buildDocGroup(group) {
+    const kind = group.kind || "other";
+    const count = Number(group.count || 0);
+    const indexed = Number(group.indexed || 0);
+    const collapsed = state.collapsedGroups.has(kind);
+
+    const wrap = document.createElement("div");
+    wrap.className = "doc-group";
+
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "doc-group-head" + (collapsed ? " collapsed" : "");
+    head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    head.innerHTML =
+        '<span class="caret" aria-hidden="true"></span>' +
+        '<span class="doc-group-label">' +
+            escapeHtml(t("doc.group." + kind, group.label || kind)) + "</span>" +
+        '<span class="badge small">' + count + "</span>" +
+        (count > 0
+            ? '<span class="doc-group-indexed">' + indexed + "/" + count + "</span>"
+            : "");
+
+    const body = document.createElement("div");
+    body.className = "doc-group-body";
+    body.hidden = collapsed;
+
+    if (count === 0) {
+        // 空分组也要显示 —— 用户就是要看到「有哪些类型」
+        const empty = document.createElement("div");
+        empty.className = "muted doc-group-empty";
+        empty.textContent = t("doc.emptyGroup");
+        body.appendChild(empty);
+    } else {
+        (group.documents || []).forEach((doc) => body.appendChild(buildDocItem(doc)));
+    }
+
+    head.addEventListener("click", () => {
+        const nextCollapsed = !body.hidden;
+        body.hidden = nextCollapsed;
+        head.classList.toggle("collapsed", nextCollapsed);
+        head.setAttribute("aria-expanded", nextCollapsed ? "false" : "true");
+
+        if (nextCollapsed) state.collapsedGroups.add(kind);
+        else state.collapsedGroups.delete(kind);
+    });
+
+    wrap.appendChild(head);
+    wrap.appendChild(body);
+    return wrap;
+}
+
+async function loadDocuments() {
+    const box = $("doc-list");
+
+    try {
+        const d = await api("/api/documents");
+        state.lastDocs = d;
+
+        // 徽章显示**全部类型合计**
+        $("doc-count").textContent = d.total ?? (d.documents || []).length;
+        renderPendingNotice(d.pending_index || 0);
+
+        const groups = d.groups || [];
+        box.innerHTML = "";
+
+        if (!groups.length) {
+            box.innerHTML =
+                '<div class="muted">' + escapeHtml(t("doc.empty")) + "</div>";
+            return;
+        }
+
+        groups.forEach((group) => box.appendChild(buildDocGroup(group)));
+    } catch (err) {
+        state.lastDocs = null;
+        renderPendingNotice(0);
+        box.innerHTML =
+            '<div class="muted">' + escapeHtml(t("doc.loadFailed")) +
+            escapeHtml(err.message || err) + "</div>";
+    }
+}
+
+async function openDocument(file) {
+    setActiveDoc("markdown:" + file);
+
+    const box = $("doc-detail");
+    box.hidden = false;
+    box.innerHTML = '<div class="panel-head">文档详情</div><div class="panel-body">加载中…</div>';
+
+    try {
+        const d = await api("/api/documents/" + encodeURIComponent(file));
+        const chunks = d.chunks || [];
+        const preview = chunks.slice(0, 5);
+
+        let html =
+            '<div class="panel-head">' + escapeHtml(t("doc.detail")) + '</div><div class="panel-body">' +
+            '<div class="doc-detail-head">' + escapeHtml(d.file || file) + "</div>" +
+            '<div class="doc-detail-meta">大小 ' + escapeHtml(fmtBytes(d.size)) +
+            " · " + escapeHtml(d.chunk_count ?? chunks.length) + " 个 chunk</div>";
+
+        if (preview.length) {
+            html += preview.map((c) =>
+                '<div class="chunk-mini">' +
+                '<span class="idx">#' + escapeHtml(c.chunk_index ?? "-") + "</span>" +
+                '<span class="sec">' + escapeHtml(c.section || "（无章节标题）") + "</span>" +
+                '<span class="len">' + escapeHtml(c.length ?? 0) + " 字</span>" +
+                "</div>"
+            ).join("");
+        } else {
+            html += '<div class="muted" style="margin-top:8px">该文档尚未建索引或没有切块。</div>';
+        }
+
+        html += '<div class="row-actions"><button class="btn small ghost" id="preview-chunks-btn">预览切块内容</button></div>';
+        html += '<div id="chunk-preview"></div>';
+        html += "</div>";
+
+        box.innerHTML = html;
+        const btn = $("preview-chunks-btn");
+        if (btn) btn.addEventListener("click", () => previewChunks(file, btn));
+    } catch (err) {
+        box.innerHTML =
+            '<div class="panel-head">文档详情</div><div class="panel-body">' +
+            '<div class="doc-detail-head">' + escapeHtml(file) + "</div>" +
+            '<div style="color:var(--err)">' + escapeHtml(t("doc.loadFailed")) +
+                escapeHtml(err.message || err) + "</div></div>";
+    }
+}
+
+async function previewChunks(file, btn) {
+    const target = $("chunk-preview");
+    if (!target) return;
+    btn.disabled = true;
+    btn.textContent = "加载中…";
+    target.innerHTML = "";
+
+    try {
+        const d = await api("/api/chunks/preview", jsonPost({ file, limit: 5 }));
+        const chunks = d.chunks || [];
+
+        renderStats(null, [
+            ["总切块", d.total_chunks ?? 0],
+            ["返回", d.returned_chunks ?? chunks.length],
+            ["耗时", fmtMs(d.elapsed_ms)],
+        ]);
+
+        if (!chunks.length) {
+            target.innerHTML = '<div class="muted" style="margin-top:8px">没有可预览的切块。</div>';
+            return;
+        }
+
+        target.innerHTML = chunks.map((c, i) => {
+            const meta = c.metadata || {};
+            const src = meta.file_name || c.source || "";
+            return (
+                '<div class="chunk-mini" style="display:block">' +
+                '<div style="display:flex;gap:8px;align-items:baseline">' +
+                '<span class="idx">#' + escapeHtml(i + 1) + "</span>" +
+                '<span class="sec">' + escapeHtml(c.title || c.section || "（无标题）") + "</span>" +
+                '<span class="len">' + escapeHtml(c.chunk_id || "") + "</span>" +
+                "</div>" +
+                (src ? '<div class="muted" style="font-size:11px;margin:3px 0">' + escapeHtml(src) + "</div>" : "") +
+                '<pre class="card-body" style="max-height:200px;margin-top:6px">' +
+                escapeHtml(c.content || "") + "</pre>" +
+                "</div>"
+            );
+        }).join("");
+    } catch (err) {
+        target.innerHTML = '<div style="color:var(--err);margin-top:8px">' + escapeHtml(err.message || err) + "</div>";
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "预览切块内容";
+    }
+}
+
+/* ==========================================================================
+ * 5. 富文本渲染（答案正文）
+ *    先整体 escapeHtml，再做受限的 Markdown 轻量渲染 —— 顺序不可颠倒。
+ * ========================================================================== */
+
+/** 渲染单个非代码片段：引用角标、行内代码、粗体、标题、列表、段落 */
+function renderInlineSegment(segment) {
+    let h = escapeHtml(segment);
+
+    // 引用角标 [1] [2] …（转义之后替换，属性里不会出现原始尖括号）
+    h = h.replace(/\[(\d{1,3})\]/g, (m, n) =>
+        '<button class="cite-ref" data-cite="' + n + '" title="查看引用 ' + n + '">' + n + "</button>"
+    );
+
+    // 行内代码
+    h = h.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+
+    // 粗体 / 斜体
+    h = h.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+    h = h.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+
+    // 标题
+    h = h.replace(/^#{4,6}[ \t]+(.+)$/gm, '<h5>$1</h5>');
+    h = h.replace(/^###[ \t]+(.+)$/gm, '<h4>$1</h4>');
+    h = h.replace(/^##?[ \t]+(.+)$/gm, '<h3>$1</h3>');
+
+    // 引用行
+    h = h.replace(/^&gt;[ \t]?(.+)$/gm, '<blockquote>$1</blockquote>');
+
+    // 列表项
+    h = h.replace(/^[ \t]*[-*+][ \t]+(.+)$/gm, "<li>$1</li>");
+    h = h.replace(/^[ \t]*\d+\.[ \t]+(.+)$/gm, "<li>$1</li>");
+    h = h.replace(/(?:<li>[\s\S]*?<\/li>\s*)+/g, (block) => "<ul>" + block + "</ul>");
+
+    // 段落：连续两个换行分段，段内单换行变 <br>
+    h = h.split(/\n{2,}/).map((p) => {
+        const t = p.trim();
+        if (!t) return "";
+        if (/^<(h[3-6]|ul|ol|blockquote|pre)/.test(t)) return t;
+        return "<p>" + t.replace(/\n/g, "<br>") + "</p>";
+    }).join("");
+
+    return h;
+}
+
+/** 渲染完整答案：先按 ``` 切成代码块 / 普通片段交替处理 */
+function renderRich(raw) {
+    const text = String(raw == null ? "" : raw);
+    if (!text) return "";
+
+    const parts = text.split("```");
+    let html = "";
+    parts.forEach((part, i) => {
+        if (i % 2 === 1) {
+            // 代码块：去掉语言标记，原样保留
+            const code = part.replace(/^[a-zA-Z0-9_+#.-]*[ \t]*\n?/, "");
+            html += '<pre class="code-block">' + escapeHtml(code) + "</pre>";
+        } else {
+            html += renderInlineSegment(part);
+        }
+    });
+    return html;
+}
+
+/* ==========================================================================
+ * 6. 输出区渲染
+ * ========================================================================== */
+
+function clearOutput() {
+    $("output").innerHTML = "";
+    $("stats").innerHTML = "";
+    setContext("");
+    clearNotice();
+}
+
+function statusLine(text) {
+    return '<div class="status-line"><span class="spinner"></span><span>' + escapeHtml(text) + "</span></div>";
+}
+
+function emptyBlock(text, hint) {
+    return '<div class="empty">' + escapeHtml(text) +
+        (hint ? '<span class="hint">' + escapeHtml(hint) + "</span>" : "") + "</div>";
+}
+
+/* ------------------------------ 检索结果卡片 ------------------------------ */
+
+function scoreChips(item) {
+    const out = [];
+    if (item.rerank_score != null) out.push("rerank=" + fmtScore(item.rerank_score));
+    if (item.fusion_score != null) out.push("fusion=" + fmtScore(item.fusion_score));
+    if (item.score != null) out.push((item.source === "bm25" ? "bm25" : "similarity") + "=" + fmtScore(item.score));
+    return out;
+}
+
+function renderResults(items) {
+    renderResultsInto($("output"), items);
+}
+
+/** 结果卡片的公共头部（排名 / 来源标签 / 图片徽章 / 分数 / 文件名） */
+function cardHeadHtml(item, i, src) {
+    const scores = scoreChips(item).join(" · ");
+    const isImage = isImagePayload(item.payload);
+    return (
+        '<div class="card-head">' +
+        '<span class="rank">#' + (i + 1) + "</span>" +
+        (isImage ? '<span class="tag tag-image">图片</span>' : "") +
+        (item.source ? '<span class="tag">' + escapeHtml(item.source) + "</span>" : "") +
+        (scores ? '<span class="score">' + escapeHtml(scores) + "</span>" : "") +
+        '<span class="src" title="' + escapeHtml(src) + '">' + escapeHtml(src) + "</span>" +
+        "</div>"
+    );
+}
+
+/**
+ * 图片卡片：左侧缩略图 + 右侧描述。
+ *
+ * 缩略图失败时（文件缺失 / 非图片）隐藏 <img> 并显示占位文字 —— 由内联
+ * onerror 完成，其中**不插入任何用户数据**，只做 DOM 操作，因此无注入风险。
+ */
+function imageCardHtml(item, i, payload, meta) {
+    const src = meta.file_name || payload.source || payload.title || "未知图片";
+    const imagePath = imagePathOf(payload, meta);
+    const thumb = imageUrl(imagePath, 320);
+    const full = imageUrl(imagePath);
+    const caption = imageCaptionText(payload.content);
+    const lowQuality = meta.caption_source === "metadata";
+
+    const dims =
+        meta.width && meta.height
+            ? meta.width + " × " + meta.height
+            : "";
+
+    const metaBits = [];
+    if (dims) metaBits.push(dims);
+    if (meta.caption_source) {
+        metaBits.push(meta.caption_source === "vlm" ? "视觉模型描述" : "基础描述");
+    }
+
+    return (
+        '<div class="card card-image">' +
+        cardHeadHtml(item, i, src) +
+        '<div class="image-card">' +
+        '<button type="button" class="thumb-btn" data-full="' + escapeHtml(full) +
+        '" data-cap="' + escapeHtml(src) + '" title="点击查看大图">' +
+        '<img class="thumb" src="' + escapeHtml(thumb) + '" alt="' + escapeHtml(src) +
+        '" loading="lazy" decoding="async"' +
+        ' onerror="this.style.display=\'none\';var f=this.nextElementSibling;if(f)f.hidden=false;">' +
+        '<span class="thumb-fallback" hidden>图片无法显示</span>' +
+        "</button>" +
+        '<div class="image-meta">' +
+        '<div class="image-name" title="' + escapeHtml(imagePath) + '">' +
+        escapeHtml(src) + "</div>" +
+        (metaBits.length
+            ? '<div class="image-dims">' + escapeHtml(metaBits.join(" · ")) + "</div>"
+            : "") +
+        (caption
+            ? '<div class="image-caption">' + escapeHtml(caption) + "</div>"
+            : '<div class="image-caption muted">（无描述）</div>') +
+        (lowQuality
+            ? '<div class="image-warn">未使用视觉模型，描述质量较低</div>'
+            : "") +
+        "</div>" +
+        "</div>" +
+        "</div>"
+    );
+}
+
+/** 文本卡片（沿用原有 <pre> 渲染 + 超长展开） */
+function textCardHtml(item, i, payload, meta) {
+    const src = meta.file_name || payload.source || payload.title || "未知来源";
+    const section = payload.section || "";
+    const content = payload.content || "";
+    const long = content.length > 1200;
+
+    return (
+        '<div class="card">' +
+        cardHeadHtml(item, i, src) +
+        (section ? '<div class="card-section">' + escapeHtml(section) + "</div>" : "") +
+        '<pre class="card-body">' +
+        escapeHtml(long ? content.slice(0, 1200) : content) + "</pre>" +
+        '<div class="card-foot"></div>' +
+        "</div>"
+    );
+}
+
+/** 渲染结果卡片到指定容器（问答降级展示时复用到别的容器） */
+function renderResultsInto(box, items) {
+    if (!items || !items.length) {
+        box.innerHTML = emptyBlock("没有检索到相关结果", "试试更换关键词，或关闭 Rerank / 调大 TopK");
+        return;
+    }
+
+    // 记录 chunk 全文与完整 payload（引用卡片据此识别图片并取全文）
+    items.forEach((it) => {
+        const p = it.payload || {};
+        if (p.chunk_id) {
+            state.contentByChunk[p.chunk_id] = p.content || "";
+            state.payloadByChunk[p.chunk_id] = p;
+        }
+    });
+
+    const html = items.map((item, i) => {
+        const p = item.payload || {};
+        const meta = p.metadata || {};
+        return isImagePayload(p)
+            ? imageCardHtml(item, i, p, meta)
+            : textCardHtml(item, i, p, meta);
+    }).join("");
+
+    box.innerHTML = '<div class="results">' + html + "</div>";
+
+    // 为超长正文挂上「展开全文」按钮（用 JS 绑定，避免把全文塞进属性）
+    const cards = box.querySelectorAll(".card");
+    cards.forEach((card, i) => {
+        const content = (items[i].payload || {}).content || "";
+        if (isImagePayload(items[i].payload || {}) || content.length <= 1200) return;
+        const pre = card.querySelector(".card-body");
+        const foot = card.querySelector(".card-foot");
+        if (!pre || !foot) return;
+        const btn = document.createElement("button");
+        btn.className = "btn small ghost card-more";
+        btn.textContent = "展开全文（共 " + content.length + " 字）";
+        let expanded = false;
+        btn.addEventListener("click", () => {
+            expanded = !expanded;
+            pre.textContent = expanded ? content : content.slice(0, 1200);
+            pre.style.maxHeight = expanded ? "none" : "";
+            btn.textContent = expanded ? "收起" : ("展开全文（共 " + content.length + " 字）");
+        });
+        foot.appendChild(btn);
+    });
+}
+
+/* ------------------------------ 引用卡片 ------------------------------ */
+
+/**
+ * 引用作用域。
+ *
+ * 多轮对话里每一轮都从 [1] 开始编号，若 DOM id 仍按全局 `cite-1` 生成就会
+ * 互相冲突（点击角标跳到别的轮次）。因此给每轮一个作用域前缀：
+ *   检索 / 问答 → ""（保持原样）
+ *   对话第 n 轮 → "t<n>"
+ */
+function citeKey(scope, idx) {
+    return (scope || "") + ":" + idx;
+}
+
+function citeDomId(scope, idx) {
+    return scope ? ("cite-" + scope + "-" + idx) : ("cite-" + idx);
+}
+
+/** 从元素向上找到最近的引用作用域容器 */
+function scopeOf(el) {
+    const holder = el && el.closest ? el.closest("[data-cite-scope]") : null;
+    return holder ? (holder.dataset.citeScope || "") : "";
+}
+
+/**
+ * 网页引用的卡片。
+ *
+ * 与本地引用的差别：
+ *   - 没有本地全文，所以不给「展开片段原文」
+ *   - 标题下面挂域名外链；点击要新窗口打开，并且**不能冒泡**到站内的
+ *     引用展开/折叠逻辑
+ *   - score 常为 null，只在真有值时渲染（绝不能显示成 null / 0.0000）
+ */
+function webCitationHtml(c, idx, scope) {
+    const href = safeHttpUrl(c.url);
+    const domain = citationDomain(c);
+    const engine = c.engine ? String(c.engine) : "";
+
+    const linkHtml = href
+        ? '<a class="cite-link" href="' + escapeHtml(href) + '"' +
+          ' target="_blank" rel="noopener noreferrer"' +
+          ' title="' + escapeHtml(t("web.openLink")) + '">' +
+          escapeHtml(domain || href) + "</a>"
+        : '<span class="cite-domain">' + escapeHtml(domain) + "</span>";
+
+    return (
+        '<div class="citation-card citation-card-web"' +
+        ' id="' + citeDomId(scope, idx) + '"' +
+        ' data-cite="' + idx + '"' +
+        ' data-cite-scope="' + escapeHtml(scope) + '">' +
+        '<div class="cite-head">' +
+        '<span class="cite-index">' + idx + "</span>" +
+        '<span class="tag tag-web">' + escapeHtml(t("web.badge")) + "</span>" +
+        '<span class="cite-file">' +
+        escapeHtml(c.file_name || c.title || "—") + "</span>" +
+        (c.score != null
+            ? '<span class="cite-score">' + escapeHtml(fmtScore(c.score)) + "</span>"
+            : "") +
+        "</div>" +
+        '<div class="cite-meta">' + linkHtml +
+        (engine
+            ? '<span class="cite-engine">' + escapeHtml(t("web.engine")) +
+              " · " + escapeHtml(engine) + "</span>"
+            : "") +
+        "</div>" +
+        (c.preview
+            ? '<div class="cite-body"><div class="cite-preview">' +
+              escapeHtml(c.preview) + "</div></div>"
+            : "") +
+        "</div>"
+    );
+}
+
+function renderCitations(citations, results, scope) {
+    scope = scope || "";
+    state.citations = citations || [];
+    if (!state.citations.length) return "";
+
+    // 用 results 建立 chunk_id -> 全文 / payload 的映射
+    (results || []).forEach((it) => {
+        const p = it.payload || {};
+        if (p.chunk_id) {
+            state.contentByChunk[p.chunk_id] = p.content || "";
+            state.payloadByChunk[p.chunk_id] = p;
+        }
+    });
+
+    const cards = state.citations.map((c, i) => {
+        const idx = c.index != null ? c.index : (i + 1);
+
+        // 网页引用单独一条支路：没有本地 chunk，也不该走图片/展开那套逻辑
+        if (isWebCitation(c)) return webCitationHtml(c, idx, scope);
+
+        const full = state.contentByChunk[c.chunk_id] || c.preview || "";
+        const metaParts = [];
+        if (c.title) metaParts.push(c.title);
+        if (c.section) metaParts.push(c.section);
+        if (c.page != null && c.page !== "") metaParts.push("第 " + c.page + " 页");
+        if (c.chunk_id) metaParts.push(c.chunk_id);
+
+        // 图片引用：有 payload 时用精确 image_path，否则退回文件名
+        const payload = state.payloadByChunk[c.chunk_id];
+        const isImage = isImagePayload(payload) || isImageCitation(c);
+        let thumbHtml = "";
+
+        if (isImage) {
+            // 优先级：payload 里的 image_path（精确）
+            //      → citation 的 image_path（后端新字段，流式下也有）
+            //      → 文件名兜底
+            const imagePath = payload
+                ? imagePathOf(payload)
+                : citationImagePath(c);
+            const name = c.file_name || c.source || "图片";
+
+            thumbHtml =
+                '<button type="button" class="thumb-btn cite-thumb-btn"' +
+                ' data-full="' + escapeHtml(imageUrl(imagePath)) + '"' +
+                ' data-cap="' + escapeHtml(name) + '" title="点击查看大图">' +
+                '<img class="thumb cite-thumb" src="' + escapeHtml(imageUrl(imagePath, 160)) +
+                '" alt="' + escapeHtml(name) + '" loading="lazy" decoding="async"' +
+                ' onerror="this.style.display=\'none\';var f=this.nextElementSibling;if(f)f.hidden=false;">' +
+                '<span class="thumb-fallback" hidden>无图</span>' +
+                "</button>";
+        }
+
+        return (
+            '<div class="citation-card' + (isImage ? " citation-card-image" : "") +
+            '" id="' + citeDomId(scope, idx) + '"' +
+            ' data-cite="' + idx + '"' +
+            ' data-cite-scope="' + escapeHtml(scope) + '">' +
+            '<div class="cite-head">' +
+            '<span class="cite-index">' + idx + "</span>" +
+            (isImage ? '<span class="tag tag-image">图片</span>' : "") +
+            '<span class="cite-file">' + escapeHtml(c.file_name || c.source || "未知来源") + "</span>" +
+            (c.score != null ? '<span class="cite-score">' + escapeHtml(fmtScore(c.score)) + "</span>" : "") +
+            "</div>" +
+            (metaParts.length ? '<div class="cite-meta">' + escapeHtml(metaParts.join(" · ")) + "</div>" : "") +
+            '<div class="cite-body">' +
+            thumbHtml +
+            '<div class="cite-preview">' + escapeHtml(c.preview || full.slice(0, 300)) + "</div>" +
+            "</div>" +
+            '<button class="cite-toggle" data-cite="' + idx + '">展开片段原文</button>' +
+            "</div>"
+        );
+    }).join("");
+
+    // 全文按「作用域:序号」存进 map，供「展开片段」按钮取用
+    // （不能挂在 DOM 节点上：这里最终返回的是 innerHTML 字符串）
+    state.citations.forEach((c, i) => {
+        const idx = c.index != null ? c.index : (i + 1);
+        state.citeFullText[citeKey(scope, idx)] =
+            state.contentByChunk[c.chunk_id] || c.preview || "";
+    });
+
+    return '<div class="citations">' + cards + "</div>";
+}
+
+function toggleCitation(btn) {
+    const card = btn.closest(".citation-card");
+    if (!card) return;
+    const scope = card.dataset.citeScope || "";
+    const expanded = card.classList.toggle("expanded");
+    const preview = card.querySelector(".cite-preview");
+    if (expanded) {
+        const full = (state.citeFullText || {})[
+            citeKey(scope, Number(card.dataset.cite))
+        ];
+        if (preview && full) preview.textContent = full;
+        btn.textContent = "收起片段";
+    } else {
+        btn.textContent = "展开片段原文";
+    }
+}
+
+function focusCitation(n, scope) {
+    const target = document.getElementById(citeDomId(scope || "", n));
+    if (!target) {
+        showNotice("未找到第 " + n + " 条引用。", "warn");
+        return;
+    }
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.classList.add("highlight");
+    setTimeout(() => target.classList.remove("highlight"), 1600);
+}
+
+/* ==========================================================================
+ * 7. 检索模式
+ * ========================================================================== */
+
+function buildBody(query) {
+    const body = {
+        query: query,
+        top_k: Number($("top-k").value) || 5,
+        use_bm25: $("use-bm25").checked,
+        use_reranker: $("use-reranker").checked,
+        include_images: $("include-images").checked,
+        use_web: webEnabledNow(),
+    };
+
+    // 条数 / 抓取策略由设置面板决定；没取到就别塞字段，让后端用默认值
+    const cfg = webState.config;
+    if (cfg && cfg.max_results != null) body.web_limit = cfg.max_results;
+    if (cfg && cfg.fetch_pages != null) body.web_fetch_pages = cfg.fetch_pages;
+
+    return body;
+}
+
+/** 当前联网开关是否打开（三处已联动，读任意一处即可） */
+function webEnabledNow() {
+    const el = $("use-web-search");
+    if (el) return el.checked;
+    return !!(webState.config && webState.config.enabled);
+}
+
+/**
+ * 问答请求体。
+ *
+ * mode 为「快速 / 精确」档位：
+ *   fast    -> 后端关闭思考过程（chat_template_kwargs.enable_thinking=false）
+ *   precise -> 开启思考过程
+ * temperature / max_tokens 传 null，交由后端的档位默认值决定。
+ */
+function buildAskBody(query) {
+    const body = buildBody(query);
+    body.mode = $("answer-mode").value;
+    body.temperature = null;
+    body.max_tokens = null;
+    return body;
+}
+
+async function doSearch() {
+    const query = $("query").value.trim();
+    if (!query) { showNotice("请输入查询内容。", "warn"); return; }
+
+    clearNotice();
+    $("stats").innerHTML = "";
+    setContext("");
+    $("output").innerHTML = statusLine(
+        webEnabledNow() ? t("web.searching") : "正在检索知识库…"
+    );
+
+    try {
+        const d = await api("/api/search", jsonPost(buildBody(query)));
+
+        if (d.status === "empty") {
+            $("output").innerHTML = emptyBlock(d.message || "知识库尚未建索引", "先在左侧点击「构建索引」");
+            $("stats").innerHTML = "";
+            return;
+        }
+
+        renderResults(d.results || []);
+        renderStats(d.stats, webChips(d.web));
+        setContext(d.context);
+
+        // 联网失败不该让整次检索看起来像失败 —— 本地结果仍然是有效的
+        if (d.web && d.web.error) {
+            showNotice(t("web.error") + d.web.error, "warn");
+        } else if (!(d.results || []).length) {
+            showNotice("检索完成，但没有命中任何内容。", "warn");
+        }
+    } catch (err) {
+        $("output").innerHTML = emptyBlock("检索失败", err.message || String(err));
+        showNotice("检索失败：" + (err.message || err), "err");
+    }
+}
+
+/**
+ * 把响应的 `web` 状态转成状态栏 chip。
+ *
+ * 只在真的走了联网时才有内容，避免给普通的本地检索添噪音。
+ */
+function webChips(web) {
+    if (!web || !web.enabled) return null;
+
+    const chips = [];
+    if (web.provider) chips.push([t("web.engine"), web.provider]);
+    if (web.fetched_pages != null) {
+        chips.push([
+            t("web.chipWeb"),
+            fmtTemplate(t("web.fetched"), { n: web.fetched_pages }),
+        ]);
+    }
+    if (web.elapsed_ms != null) chips.push([t("web.chipWeb"), fmtMs(web.elapsed_ms)]);
+
+    return chips.length ? chips : null;
+}
+
+/* ==========================================================================
+ * 8. 问答模式
+ * ========================================================================== */
+
+function resetAnswerState() {
+    state.answerRaw = "";
+    state.reasoningRaw = "";
+    state.streaming = false;
+    state.paintPending = false;
+    state.citations = [];
+    state.contentByChunk = {};
+    state.payloadByChunk = {};
+    state.citeFullText = {};
+}
+
+/** 输出区骨架：答案卡片 + 思考过程 + 引用区 */
+function renderAnswerShell() {
+    $("output").innerHTML =
+        '<div class="reasoning" id="reasoning-box" hidden>' +
+        '<summary id="reasoning-summary">思考过程</summary>' +
+        '<div class="reasoning-body" id="reasoning-body"></div>' +
+        "</div>" +
+        '<div class="answer-card">' +
+        '<div class="answer-head">' +
+        '<span class="title">回答</span>' +
+        '<span class="meta" id="answer-meta"></span>' +
+        "</div>" +
+        '<div class="answer-body" id="answer-body"></div>' +
+        "</div>" +
+        '<div id="citations-wrap"></div>';
+}
+
+/** 排入下一帧渲染，避免每个 token 都重排 DOM */
+function scheduleAnswerPaint() {
+    if (state.paintPending) return;
+    state.paintPending = true;
+    requestAnimationFrame(() => {
+        state.paintPending = false;
+        paintAnswer();
+    });
+}
+
+function paintAnswer() {
+    const body = $("answer-body");
+    if (!body) return;
+    const cursor = state.streaming ? '<span class="cursor"></span>' : "";
+    body.innerHTML = renderRich(state.answerRaw) + cursor;
+}
+
+function paintReasoning() {
+    const box = $("reasoning-box");
+    const body = $("reasoning-body");
+    if (!box || !body) return;
+    if (!state.reasoningRaw.trim()) return;
+    box.hidden = false;
+    body.textContent = state.reasoningRaw;
+    body.scrollTop = body.scrollHeight;
+}
+
+function setAnswerMeta(chips) {
+    const el = $("answer-meta");
+    if (!el) return;
+    el.innerHTML = (chips || [])
+        .filter(Boolean)
+        .map((c) => '<span class="chip">' + escapeHtml(c[0]) + " <b>" + escapeHtml(c[1]) + "</b></span>")
+        .join("");
+}
+
+/**
+ * 降级展示：生成模型不可用（503）时，至少把检索结果和引用完整呈现出来。
+ * detail 形如 {message, degraded, results, citations, context, stats}
+ */
+function renderDegraded(detail, message) {
+    const results = (detail && detail.results) || [];
+    const citations = (detail && detail.citations) || [];
+
+    // 先渲染结果（它会写入 state.contentByChunk，供引用卡片取全文）
+    const resultsHolder = document.createElement("div");
+    renderResultsInto(resultsHolder, results);
+
+    const out = $("output");
+    out.innerHTML = "";
+
+    if (citations.length) {
+        const title = document.createElement("div");
+        title.className = "section-title";
+        title.textContent = "引用来源";
+        out.appendChild(title);
+        out.insertAdjacentHTML("beforeend", renderCitations(citations, results));
+    }
+
+    const rTitle = document.createElement("div");
+    rTitle.className = "section-title";
+    rTitle.textContent = "检索结果";
+    out.appendChild(rTitle);
+    out.appendChild(resultsHolder);
+
+    renderStats(detail && detail.stats);
+    setContext(detail && detail.context);
+    showNotice(message || "生成模型不可用，已降级为仅展示检索结果。", "warn");
+}
+
+/* ------------------------------ 一次性问答 ------------------------------ */
+
+async function askOnce(query) {
+    $("output").innerHTML = statusLine("正在检索并生成回答…");
+    try {
+        const d = await api("/api/ask", jsonPost(buildAskBody(query)));
+
+        resetAnswerState();
+        state.answerRaw = d.answer || "";
+        state.reasoningRaw = d.reasoning || "";
+        renderAnswerShell();
+
+        paintAnswer();
+        paintReasoning();
+
+        $("citations-wrap").innerHTML = (d.citations && d.citations.length)
+            ? '<div class="section-title">引用来源</div>' + renderCitations(d.citations, d.results)
+            : "";
+
+        const usage = d.usage || {};
+        setAnswerMeta([
+            ["耗时", fmtMs(d.elapsed_ms)],
+            d.model ? ["模型", d.model] : null,
+            usage.total_tokens != null ? ["Tokens", usage.total_tokens] : null,
+            d.finish_reason ? ["结束", d.finish_reason] : null,
+        ]);
+
+        renderStats(d.stats);
+        setContext(d.context);
+
+        if (!state.answerRaw) {
+            $("answer-body").innerHTML = '<span class="muted">（模型没有返回内容）</span>';
+        }
+    } catch (err) {
+        // 503 + degraded：生成模型不可用，降级展示检索结果
+        if (err.status === 503 && err.detail && typeof err.detail === "object" && err.detail.degraded) {
+            renderDegraded(err.detail, err.detail.message || err.message);
+        } else {
+            $("output").innerHTML = emptyBlock("问答失败", err.message || String(err));
+            showNotice("问答失败：" + (err.message || err), "err");
+        }
+    }
+}
+
+/* ------------------------------ 流式问答 (SSE over POST) ------------------------------ */
+
+/**
+ * 解析单个 SSE 帧：取所有 `data:` 行，按规范用 \n 连接后 JSON.parse。
+ */
+function parseSseFrame(frame) {
+    const lines = frame.split("\n");
+    const dataLines = [];
+    for (const line of lines) {
+        if (line.startsWith("data:")) {
+            // SSE 规范：冒号后若有单个空格则去掉
+            dataLines.push(line.slice(5).replace(/^ /, ""));
+        }
+    }
+    if (!dataLines.length) return null;
+    try {
+        return JSON.parse(dataLines.join("\n"));
+    } catch (_) {
+        return null;
+    }
+}
+
+async function askStream(query) {
+    const controller = new AbortController();
+    state.abort = controller;
+    $('stop-btn').hidden = false;   // 流式过程中允许手动中断
+
+    resetAnswerState();
+    $("output").innerHTML = statusLine("正在检索知识库…");
+    $("stats").innerHTML = "";
+    setContext("");
+
+    const body = buildAskBody(query);
+
+    let res;
+    try {
+        res = await fetch("/api/ask/stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+        });
+    } catch (err) {
+        if (err.name === "AbortError") return;
+        $("output").innerHTML = emptyBlock("请求失败", err.message || String(err));
+        showNotice("请求失败：" + (err.message || err), "err");
+        return;
+    }
+
+    // 非 2xx：可能是 400/500 的 JSON 错误（流式接口一般不会返回 503）
+    if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (_) {}
+        const detail = data && data.detail;
+        const msg = typeof detail === "string" ? detail : (detail && detail.message) || ("HTTP " + res.status);
+        if (res.status === 503 && detail && detail.degraded) {
+            renderDegraded(detail, msg);
+        } else {
+            $("output").innerHTML = emptyBlock("问答失败", msg);
+            showNotice("问答失败：" + msg, "err");
+        }
+        return;
+    }
+
+    if (!res.body) {
+        $("output").innerHTML = emptyBlock("当前浏览器不支持流式读取", "可关闭「流式输出」改用一次性回答");
+        return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let shellReady = false;
+    let gotError = false;
+
+    const ensureShell = () => {
+        if (shellReady) return;
+        shellReady = true;
+        renderAnswerShell();
+    };
+
+    const handleEvent = (evt) => {
+        if (!evt || typeof evt !== "object") return;
+
+        switch (evt.type) {
+            case "status":
+                if (!shellReady) {
+                    // 联网阶段单独给一句更准确的提示
+                    const isWeb = evt.stage && String(evt.stage).indexOf("web") >= 0;
+                    $("output").innerHTML = statusLine(
+                        isWeb ? t("web.searching") : (evt.message || "处理中…")
+                    );
+                }
+                break;
+
+            case "citations": {
+                ensureShell();
+                state.streaming = true;
+                const citations = evt.citations || [];
+                const results = evt.results || [];
+                $("citations-wrap").innerHTML = citations.length
+                    ? '<div class="section-title">引用来源</div>' + renderCitations(citations, results)
+                    : "";
+                renderStats(evt.stats);
+                if (evt.context) setContext(evt.context);
+                paintAnswer();
+                break;
+            }
+
+            case "reasoning":
+                ensureShell();
+                state.streaming = true;
+                state.reasoningRaw += evt.text || "";
+                paintReasoning();
+                paintAnswer();
+                break;
+
+            case "token":
+                ensureShell();
+                state.streaming = true;
+                state.answerRaw += evt.text || "";
+                scheduleAnswerPaint();
+                break;
+
+            case "done":
+                state.streaming = false;
+                paintAnswer();
+                setAnswerMeta([
+                    ["耗时", fmtMs(evt.elapsed_ms)],
+                    evt.model ? ["模型", evt.model] : null,
+                    evt.usage && evt.usage.total_tokens != null ? ["Tokens", evt.usage.total_tokens] : null,
+                ]);
+                if (!state.answerRaw.trim()) {
+                    const b = $("answer-body");
+                    if (b) b.innerHTML = '<span class="muted">（模型没有返回内容）</span>';
+                }
+                break;
+
+            case "error":
+                gotError = true;
+                state.streaming = false;
+                ensureShell();
+                paintAnswer();
+                if (evt.degraded) {
+                    showNotice((evt.message || "生成模型不可用") + "，已降级为仅展示检索结果。", "warn");
+                } else {
+                    showNotice(evt.message || "问答失败", "err");
+                }
+                break;
+
+            default:
+                break;
+        }
+    };
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            // 统一换行，兼容 \r\n
+            buffer = buffer.replace(/\r\n/g, "\n");
+
+            let sep;
+            while ((sep = buffer.indexOf("\n\n")) !== -1) {
+                const frame = buffer.slice(0, sep);
+                buffer = buffer.slice(sep + 2);
+                if (frame.trim()) handleEvent(parseSseFrame(frame));
+            }
+        }
+        // 冲刷解码器与残留帧
+        buffer += decoder.decode();
+        buffer = buffer.replace(/\r\n/g, "\n");
+        if (buffer.trim()) handleEvent(parseSseFrame(buffer));
+    } catch (err) {
+        if (err.name === "AbortError") {
+            state.streaming = false;
+            paintAnswer();
+            showNotice("已停止生成。", "info");
+            return;
+        }
+        showNotice("流式读取中断：" + (err.message || err), "err");
+        state.streaming = false;
+        paintAnswer();
+        return;
+    }
+
+    state.streaming = false;
+    paintAnswer();
+
+    if (!shellReady && !gotError) {
+        $("output").innerHTML = emptyBlock("没有收到任何回答内容", "请检查后端日志");
+    }
+}
+
+/* ==========================================================================
+ * 8b. 多轮对话
+ *
+ * 与「问答」的区别：带上会话历史，并先由后端把追问改写成独立可检索的查询。
+ * 界面要点：
+ *   - 每条助手消息独立持有自己的流式缓冲与引用作用域（否则多轮间引用 id 冲突）
+ *   - 收到 condensed 事件时，在用户那条消息下方标注「改写为 …」
+ * ========================================================================== */
+
+/** 当前正在流式输出的那一轮（同一时刻只会有一个） */
+let chatCtx = null;
+
+/* ------------------------------ 会话列表 ------------------------------ */
+
+/** 相对时间：刚刚 / n 分钟前 / n 小时前 / n 天前 / 具体日期 */
+function fmtRelative(value) {
+    const ms = (typeof value === "number" && value <= 1e11)
+        ? value * 1000
+        : Number(value);
+    if (!Number.isFinite(ms)) return "—";
+
+    const diff = Date.now() - ms;
+    if (!Number.isFinite(diff)) return "—";
+    if (diff < 0) return "刚刚";
+
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "刚刚";
+    if (mins < 60) return mins + " 分钟前";
+
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return hours + " 小时前";
+
+    const days = Math.floor(hours / 24);
+    if (days < 7) return days + " 天前";
+
+    return fmtDate(value).slice(0, 10);
+}
+
+/** 会话标题：优先用模型生成的 title，其次退回首问摘要 */
+function convTitleOf(conv) {
+    const title = (conv && conv.title) || "";
+    if (title && title !== "新对话") return title;
+    return (conv && (conv.preview || conv.last_question)) || "新对话";
+}
+
+async function loadConversations() {
+    try {
+        const d = await api("/api/conversations?limit=50");
+        state.conversations = (d && d.conversations) || [];
+    } catch (_) {
+        state.conversations = [];
+    }
+    renderConversations();
+}
+
+function renderConversations() {
+    const box = $("conv-list");
+    const list = state.conversations || [];
+
+    $("conv-count").textContent = String(list.length);
+
+    if (!list.length) {
+        box.innerHTML = '<div class="muted">' +
+            escapeHtml(t("conv.empty")) + "</div>";
+        return;
+    }
+
+    box.innerHTML = list.map((conv) => {
+        const active = conv.id === state.conversationId;
+        return (
+            '<div class="conv-item' + (active ? " active" : "") + '"' +
+            ' data-conv-id="' + escapeHtml(conv.id) + '">' +
+            '<button type="button" class="conv-open" data-conv-open="' +
+            escapeHtml(conv.id) + '" title="' + escapeHtml(convTitleOf(conv)) + '">' +
+            '<span class="conv-title">' + escapeHtml(convTitleOf(conv)) + "</span>" +
+            '<span class="conv-meta">' +
+            escapeHtml(conv.turn_count || 0) + escapeHtml(t("conv.turns")) + " · " +
+            escapeHtml(fmtRelative(conv.updated_at)) +
+            "</span>" +
+            "</button>" +
+            '<button type="button" class="conv-del" data-conv-del="' +
+            escapeHtml(conv.id) + '" title="' + escapeHtml(t("conv.deleteConfirm")) +
+            '" aria-label="' + escapeHtml(t("conv.deleteConfirm")) +
+            '">×</button>' +
+            "</div>"
+        );
+    }).join("");
+}
+
+/** 回到「新对话」状态（不预先在服务端建空会话，首条消息时才创建） */
+function newConversation() {
+    if (state.chatStreaming || state.chatBusy) {
+        showNotice("正在生成回答，请先停止或等待完成。", "warn");
+        return;
+    }
+
+    state.conversationId = null;
+    state.chatTurnCount = 0;
+    chatCtx = null;
+    $("chat-stream").innerHTML = chatEmptyHint();
+    renderConversations();
+
+    if (state.mode === "chat") $("chat-input").focus();
+}
+
+function chatEmptyHint() {
+    return (
+        '<div class="chat-empty">' +
+        '<div class="chat-empty-title">开始一段对话</div>' +
+        '<div class="chat-empty-hint">' +
+        "我会记住上下文。像「那第二点呢」这样的追问，会先改写成独立查询再去检索，" +
+        "因此也能搜到内容。" +
+        "</div>" +
+        "</div>"
+    );
+}
+
+async function openConversation(id) {
+    if (state.chatStreaming || state.chatBusy) {
+        showNotice("正在生成回答，请先停止或等待完成。", "warn");
+        return;
+    }
+
+    clearNotice();
+
+    try {
+        const d = await api("/api/conversations/" + encodeURIComponent(id));
+        const conv = (d && d.conversation) || {};
+        const turns = conv.turns || [];
+
+        state.conversationId = conv.id || id;
+        state.chatTurnCount = 0;
+
+        const stream = $("chat-stream");
+        stream.innerHTML = "";
+
+        if (!turns.length) {
+            stream.innerHTML = chatEmptyHint();
+        } else {
+            turns.forEach((turn) => renderChatTurn(turn));
+        }
+
+        renderConversations();
+        scrollChatToEnd();
+        if (state.mode === "chat") $("chat-input").focus();
+
+    } catch (err) {
+        showNotice("打开会话失败：" + (err.message || err), "err");
+        if (err.status === 404) loadConversations();
+    }
+}
+
+async function removeConversation(id, ev) {
+    if (ev) ev.stopPropagation();
+
+    if (!confirm(t("conv.deleteConfirm"))) return;
+
+    try {
+        await api("/api/conversations/" + encodeURIComponent(id), { method: "DELETE" });
+    } catch (err) {
+        showNotice("删除失败：" + (err.message || err), "err");
+        return;
+    }
+
+    // 删的是当前会话 → 回到新对话状态
+    if (state.conversationId === id) {
+        state.conversationId = null;
+        state.chatTurnCount = 0;
+        $("chat-stream").innerHTML = chatEmptyHint();
+    }
+
+    await loadConversations();
+    showNotice("会话已删除。", "ok");
+}
+
+/* ------------------------------ 消息渲染 ------------------------------ */
+
+function chatScopeOf(seq) {
+    return "t" + seq;
+}
+
+function scrollChatToEnd() {
+    const stream = $("chat-stream");
+    if (stream) stream.scrollTop = stream.scrollHeight;
+}
+
+/** 用户消息（返回该节点，便于稍后挂「改写」提示） */
+function appendUserBubble(text) {
+    const stream = $("chat-stream");
+    const wrap = document.createElement("div");
+    wrap.className = "chat-msg chat-msg-user";
+    wrap.innerHTML =
+        '<div class="bubble bubble-user">' + escapeHtml(text).replace(/\n/g, "<br>") + "</div>" +
+        '<div class="chat-condensed" hidden></div>';
+    stream.appendChild(wrap);
+    scrollChatToEnd();
+    return wrap;
+}
+
+/** 助手消息骨架（返回流式上下文） */
+function appendAssistantBubble(seq) {
+    const stream = $("chat-stream");
+    const scope = chatScopeOf(seq);
+
+    const wrap = document.createElement("div");
+    wrap.className = "chat-msg chat-msg-assistant";
+    wrap.dataset.citeScope = scope;
+
+    wrap.innerHTML =
+        '<div class="bubble bubble-assistant">' +
+        '<div class="chat-status"><span class="spinner"></span><span class="chat-status-text">准备中…</span></div>' +
+        '<details class="reasoning chat-reasoning" hidden>' +
+        "<summary>思考过程</summary>" +
+        '<div class="reasoning-body"></div>' +
+        "</details>" +
+        '<div class="answer-body"></div>' +
+        "</div>" +
+        '<div class="chat-meta"></div>' +
+        '<div class="citations-wrap"></div>';
+
+    stream.appendChild(wrap);
+    scrollChatToEnd();
+
+    return {
+        seq: seq,
+        scope: scope,
+        wrap: wrap,
+        statusEl: wrap.querySelector(".chat-status"),
+        statusText: wrap.querySelector(".chat-status-text"),
+        reasoningBox: wrap.querySelector(".chat-reasoning"),
+        reasoningBody: wrap.querySelector(".reasoning-body"),
+        answerBody: wrap.querySelector(".answer-body"),
+        metaEl: wrap.querySelector(".chat-meta"),
+        citationsWrap: wrap.querySelector(".citations-wrap"),
+        answerRaw: "",
+        reasoningRaw: "",
+        streaming: true,
+        paintPending: false,
+    };
+}
+
+/** 在用户消息下方标注「结合上下文改写为 …」 */
+function setCondensedNote(userWrap, query) {
+    if (!userWrap || !query) return;
+    const note = userWrap.querySelector(".chat-condensed");
+    if (!note) return;
+    note.hidden = false;
+    note.innerHTML =
+        '<span class="condensed-arrow">↳</span> 结合上下文改写为' +
+        '「<span class="condensed-query">' + escapeHtml(query) + "</span>」";
+}
+
+function setChatStatus(ctx, text) {
+    if (!ctx || !ctx.statusEl) return;
+    if (!text) {
+        ctx.statusEl.hidden = true;
+        return;
+    }
+    ctx.statusEl.hidden = false;
+    if (ctx.statusText) ctx.statusText.textContent = text;
+}
+
+function paintChatAnswer() {
+    if (!chatCtx || !chatCtx.answerBody) return;
+    const cursor = chatCtx.streaming ? '<span class="cursor"></span>' : "";
+    chatCtx.answerBody.innerHTML = renderRich(chatCtx.answerRaw) + cursor;
+}
+
+function scheduleChatPaint() {
+    if (state.chatPaintPending) return;
+    state.chatPaintPending = true;
+    requestAnimationFrame(() => {
+        state.chatPaintPending = false;
+        paintChatAnswer();
+        scrollChatToEnd();
+    });
+}
+
+function paintChatReasoning() {
+    if (!chatCtx || !chatCtx.reasoningBox) return;
+    if (!chatCtx.reasoningRaw.trim()) return;
+    chatCtx.reasoningBox.hidden = false;
+    chatCtx.reasoningBody.textContent = chatCtx.reasoningRaw;
+    chatCtx.reasoningBody.scrollTop = chatCtx.reasoningBody.scrollHeight;
+}
+
+function setChatMeta(ctx, chips) {
+    if (!ctx || !ctx.metaEl) return;
+    ctx.metaEl.innerHTML = (chips || [])
+        .filter(Boolean)
+        .map((c) => '<span class="chip">' + escapeHtml(c[0]) + " <b>" + escapeHtml(c[1]) + "</b></span>")
+        .join("");
+}
+
+/** 渲染一轮完整历史（用于切换会话） */
+function renderChatTurn(turn) {
+    if (!turn) return;
+
+    const seq = state.chatTurnCount++;
+    appendUserBubble(turn.question || "");
+
+    if (turn.retrieval_query && turn.retrieval_query.trim() !== (turn.question || "").trim()) {
+        const lastUser = $("chat-stream").querySelector(".chat-msg-user:last-of-type");
+        setCondensedNote(lastUser, turn.retrieval_query);
+    }
+
+    const ctx = appendAssistantBubble(seq);
+    ctx.streaming = false;
+    setChatStatus(ctx, "");
+
+    ctx.answerRaw = turn.answer || "";
+    ctx.reasoningRaw = turn.reasoning || "";
+    paintChatAnswer();
+    paintChatReasoning();
+
+    if (!ctx.answerRaw.trim()) {
+        ctx.answerBody.innerHTML = turn.error
+            ? '<span class="muted">' + escapeHtml(turn.error) + "</span>"
+            : '<span class="muted">（没有回答内容）</span>';
+    }
+
+    const citations = turn.citations || [];
+    if (citations.length) {
+        ctx.citationsWrap.innerHTML =
+            '<div class="section-title">引用来源</div>' +
+            renderCitations(citations, turn.results || [], ctx.scope);
+    }
+
+    setChatMeta(ctx, [
+        turn.elapsed_ms ? ["耗时", fmtMs(turn.elapsed_ms)] : null,
+        turn.model ? ["模型", turn.model] : null,
+        turn.mode ? ["档位", turn.mode] : null,
+    ]);
+}
+
+/* ------------------------------ 发送 ------------------------------ */
+
+function buildChatBody(query) {
+    const body = {
+        query: query,
+        conversation_id: state.conversationId,   // null → 后端自动新建
+        top_k: Number($("top-k").value) || 5,
+        use_bm25: $("use-bm25").checked,
+        use_reranker: $("use-reranker").checked,
+        include_images: $("include-images").checked,
+        mode: $("answer-mode").value,
+        condense: $("use-condense").checked,
+        temperature: null,
+        max_tokens: null,
+        provider: null,
+        use_web: webEnabledNow(),
+    };
+
+    const cfg = webState.config;
+    if (cfg && cfg.max_results != null) body.web_limit = cfg.max_results;
+    if (cfg && cfg.fetch_pages != null) body.web_fetch_pages = cfg.fetch_pages;
+
+    return body;
+}
+
+function setChatBusy(busy) {
+    state.chatBusy = busy;
+    $("chat-send-btn").disabled = busy;
+    $("chat-input").disabled = busy;
+    $("chat-stop-btn").hidden = !busy;
+}
+
+async function sendChat() {
+    const input = $("chat-input");
+    const query = input.value.trim();
+
+    if (!query) {
+        showNotice("请输入内容。", "warn");
+        input.focus();
+        return;
+    }
+    if (state.chatBusy || state.chatStreaming) return;
+
+    clearNotice();
+    input.value = "";
+    autoGrowChatInput();
+
+    // 首条消息时清掉空态提示
+    const stream = $("chat-stream");
+    const empty = stream.querySelector(".chat-empty");
+    if (empty) empty.remove();
+
+    const seq = state.chatTurnCount++;
+    const userWrap = appendUserBubble(query);
+    chatCtx = appendAssistantBubble(seq);
+    setChatStatus(chatCtx, "正在理解问题…");
+
+    setChatBusy(true);
+
+    try {
+        if ($("use-stream").checked) {
+            await chatStream(query, userWrap, chatCtx);
+        } else {
+            await chatOnce(query, userWrap, chatCtx);
+        }
+    } finally {
+        state.chatAbort = null;
+        state.chatStreaming = false;
+        if (chatCtx) {
+            chatCtx.streaming = false;
+            setChatStatus(chatCtx, "");
+            paintChatAnswer();
+        }
+        setChatBusy(false);
+        chatCtx = null;
+        await loadConversations();
+    }
+}
+
+/** 一次性（非流式）对话 */
+async function chatOnce(query, userWrap, ctx) {
+    let data;
+    try {
+        data = await api("/api/chat", jsonPost(buildChatBody(query)));
+    } catch (err) {
+        if (err.status === 503) {
+            showNotice(
+                ((err.detail && err.detail.message) || err.message || "生成模型不可用") +
+                "。可切换到「问答」模式仅查看检索结果。",
+                "warn"
+            );
+        } else {
+            showNotice("对话失败：" + (err.message || err), "err");
+        }
+        ctx.answerBody.innerHTML = '<span class="muted">（本轮没有回答）</span>';
+        return;
+    }
+
+    if (data.status === "empty") {
+        ctx.answerBody.innerHTML = '<span class="muted">' + escapeHtml(data.message || "知识库尚未建索引") + "</span>";
+        return;
+    }
+
+    state.conversationId = data.conversation_id || state.conversationId;
+
+    const turn = data.turn || {};
+    if (turn.retrieval_query && turn.retrieval_query.trim() !== query.trim()) {
+        setCondensedNote(userWrap, turn.retrieval_query);
+    }
+
+    setChatStatus(ctx, "");
+    ctx.streaming = false;
+    ctx.answerRaw = turn.answer || "";
+    ctx.reasoningRaw = turn.reasoning || "";
+    paintChatAnswer();
+    paintChatReasoning();
+
+    if (!ctx.answerRaw.trim()) {
+        ctx.answerBody.innerHTML = '<span class="muted">（模型没有返回内容）</span>';
+    }
+
+    const citations = turn.citations || [];
+    if (citations.length) {
+        ctx.citationsWrap.innerHTML =
+            '<div class="section-title">引用来源</div>' +
+            renderCitations(citations, turn.results || [], ctx.scope);
+    }
+
+    setChatMeta(ctx, [
+        turn.elapsed_ms ? ["耗时", fmtMs(turn.elapsed_ms)] : null,
+        turn.model ? ["模型", turn.model] : null,
+        turn.mode ? ["档位", turn.mode] : null,
+    ]);
+
+    scrollChatToEnd();
+}
+
+/** 流式对话（SSE over POST，复用 /api/ask/stream 同一套解析方式） */
+async function chatStream(query, userWrap, ctx) {
+    const controller = new AbortController();
+    state.chatAbort = controller;
+    state.chatStreaming = true;
+
+    let res;
+    try {
+        res = await fetch("/api/chat/stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(buildChatBody(query)),
+            signal: controller.signal,
+        });
+    } catch (err) {
+        state.chatStreaming = false;
+        if (err.name === "AbortError") return;
+        ctx.answerBody.innerHTML = '<span class="muted">请求失败</span>';
+        showNotice("请求失败：" + (err.message || err), "err");
+        return;
+    }
+
+    if (!res.ok) {
+        state.chatStreaming = false;
+        const text = await res.text().catch(() => "");
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (_) {}
+        const detail = data && data.detail;
+        const msg = typeof detail === "string"
+            ? detail
+            : ((detail && detail.message) || ("HTTP " + res.status));
+        setChatStatus(ctx, "");
+        ctx.streaming = false;
+        ctx.answerBody.innerHTML = '<span class="muted">（本轮没有回答）</span>';
+        showNotice("对话失败：" + msg, res.status === 503 ? "warn" : "err");
+        return;
+    }
+
+    if (!res.body) {
+        state.chatStreaming = false;
+        setChatStatus(ctx, "");
+        ctx.answerBody.innerHTML = '<span class="muted">当前浏览器不支持流式读取，可关闭「流式输出」。</span>';
+        return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let gotError = false;
+
+    const handleEvent = (evt) => {
+        if (!evt || typeof evt !== "object") return;
+
+        switch (evt.type) {
+            case "conversation":
+                // 首条消息：后端此时才真正建会话
+                if (evt.conversation_id) state.conversationId = evt.conversation_id;
+                break;
+
+            case "status": {
+                const isWeb = evt.stage && String(evt.stage).indexOf("web") >= 0;
+                setChatStatus(ctx, isWeb ? t("web.searching") : (evt.message || "处理中…"));
+                break;
+            }
+
+            case "condensed":
+                setCondensedNote(userWrap, evt.query || "");
+                break;
+
+            case "citations": {
+                setChatStatus(ctx, "");
+                ctx.streaming = true;
+                const citations = evt.citations || [];
+                const results = evt.results || [];
+                ctx.citationsWrap.innerHTML = citations.length
+                    ? '<div class="section-title">引用来源</div>' +
+                      renderCitations(citations, results, ctx.scope)
+                    : "";
+                paintChatAnswer();
+                break;
+            }
+
+            case "reasoning":
+                ctx.streaming = true;
+                ctx.reasoningRaw += evt.text || "";
+                paintChatReasoning();
+                paintChatAnswer();
+                break;
+
+            case "token":
+                setChatStatus(ctx, "");
+                ctx.streaming = true;
+                ctx.answerRaw += evt.text || "";
+                scheduleChatPaint();
+                break;
+
+            case "done": {
+                ctx.streaming = false;
+                if (evt.conversation_id) state.conversationId = evt.conversation_id;
+                paintChatAnswer();
+
+                const turn = evt.turn || {};
+                setChatMeta(ctx, [
+                    ["耗时", fmtMs(evt.elapsed_ms != null ? evt.elapsed_ms : turn.elapsed_ms)],
+                    evt.model ? ["模型", evt.model] : null,
+                    evt.mode ? ["档位", evt.mode] : null,
+                ]);
+
+                // 流式期间 citations 事件已带 citations，但 results 可能为空；
+                // done 里的 turn 是最完整的，用它补一次（保证图片引用能取到路劲）
+                const citations = turn.citations || [];
+                if (citations.length) {
+                    ctx.citationsWrap.innerHTML =
+                        '<div class="section-title">引用来源</div>' +
+                        renderCitations(citations, turn.results || [], ctx.scope);
+                }
+
+                if (!ctx.answerRaw.trim()) {
+                    ctx.answerBody.innerHTML = '<span class="muted">（模型没有返回内容）</span>';
+                }
+                scrollChatToEnd();
+                break;
+            }
+
+            case "error":
+                gotError = true;
+                state.chatStreaming = false;
+                ctx.streaming = false;
+                setChatStatus(ctx, "");
+                paintChatAnswer();
+                if (evt.degraded) {
+                    showNotice((evt.message || "生成模型不可用") + "。可切换到「问答」模式仅查看检索结果。", "warn");
+                } else {
+                    showNotice(evt.message || "对话失败", "err");
+                }
+                break;
+
+            default:
+                break;
+        }
+    };
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            buffer = buffer.replace(/\r\n/g, "\n");
+
+            let sep;
+            while ((sep = buffer.indexOf("\n\n")) !== -1) {
+                const frame = buffer.slice(0, sep);
+                buffer = buffer.slice(sep + 2);
+                if (frame.trim()) handleEvent(parseSseFrame(frame));
+            }
+        }
+        buffer += decoder.decode();
+        buffer = buffer.replace(/\r\n/g, "\n");
+        if (buffer.trim()) handleEvent(parseSseFrame(buffer));
+
+    } catch (err) {
+        state.chatStreaming = false;
+        ctx.streaming = false;
+        paintChatAnswer();
+        if (err.name === "AbortError") {
+            showNotice("已停止生成。", "info");
+        } else {
+            showNotice("流式读取中断：" + (err.message || err), "err");
+        }
+        return;
+    }
+
+    state.chatStreaming = false;
+    ctx.streaming = false;
+    paintChatAnswer();
+
+    if (!ctx.answerRaw.trim() && !gotError) {
+        ctx.answerBody.innerHTML = '<span class="muted">（没有收到回答内容，请检查后端日志）</span>';
+    }
+}
+
+/** 输入框随内容增高（上限 160px） */
+function autoGrowChatInput() {
+    const el = $("chat-input");
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+}
+
+/* ==========================================================================
+ * 9. 提交 / 模式切换
+ * ========================================================================== */
+
+function setBusy(busy) {
+    state.busy = busy;
+    $("submit-btn").disabled = busy;
+    $("query").disabled = busy;
+    $("stop-btn").hidden = !(busy && state.mode === "ask" && state.abort);
+}
+
+async function submit() {
+    const query = $("query").value.trim();
+    if (!query) {
+        showNotice("请输入查询内容。", "warn");
+        $("query").focus();
+        return;
+    }
+    if (state.busy) return;
+
+    clearNotice();
+    setBusy(true);
+    try {
+        if (state.mode === "search") {
+            await doSearch();
+        } else if ($("use-stream").checked) {
+            await askStream(query);
+        } else {
+            await askOnce(query);
+        }
+    } finally {
+        state.abort = null;
+        $('stop-btn').hidden = true;
+        setBusy(false);
+    }
+}
+
+function switchMode(mode) {
+    if (state.busy || state.chatStreaming) {
+        showNotice("当前有请求正在进行，请稍候再切换模式。", "warn");
+        return;
+    }
+    state.mode = mode;
+
+    document.querySelectorAll(".tab").forEach((t) => {
+        t.classList.toggle("active", t.dataset.mode === mode);
+    });
+
+    const isChat = mode === "chat";
+    const isSearch = mode === "search";
+
+    // 顶部控件可见性（档位对「问答」与「对话」都有意义）
+    $("stream-opt").hidden = isSearch;
+    $("answer-mode-opt").hidden = isSearch;
+    $("condense-opt").hidden = !isChat;
+    $("chat-new-btn").hidden = !isChat;
+
+    // 联网开关：三个 tab 各一个（彼此联动），同一时刻只显示当前 tab 的那个
+    $("web-opt-search").hidden = mode !== "search";
+    $("web-opt-ask").hidden = mode !== "ask";
+    $("web-opt-chat").hidden = mode !== "chat";
+
+    // 对话模式用底部输入区，隐藏顶部输入与按钮（BM25/TopK 等控件保留）
+    $("query").hidden = isChat;
+    $("submit-btn").hidden = isChat;
+    $("stop-btn").hidden = true;
+
+    // 面板切换
+    $("chat-panel").hidden = !isChat;
+    $("output").hidden = isChat;
+    $("stats").hidden = isChat;
+
+    // 对话模式：主区域改为「流区滚动 + 输入区固定底部」的布局
+    $("content").classList.toggle("chat-active", isChat);
+
+    if (isChat) {
+        setContext("");
+        if (!$("chat-stream").children.length) {
+            $("chat-stream").innerHTML = chatEmptyHint();
+        }
+        renderConversations();
+        scrollChatToEnd();
+        $("chat-input").focus();
+    } else {
+        $("submit-btn").textContent = isSearch ? "搜索" : "提问";
+        $("query").placeholder = isSearch
+            ? "输入查询内容，例如：nmap 的 -sS 参数是什么？"
+            : "输入问题，例如：总结一下 SQL 注入的防御方法";
+        clearOutput();
+        $("query").focus();
+    }
+}
+
+/* ==========================================================================
+ * 10. 事件绑定与初始化
+ * ========================================================================== */
+
+// 提交
+$("submit-btn").addEventListener("click", submit);
+
+// Enter 提交（Shift+Enter 不拦截）
+$("query").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        submit();
+    }
+});
+
+// 停止流式生成
+$("stop-btn").addEventListener("click", () => {
+    if (state.abort) {
+        state.abort.abort();
+        state.abort = null;
+    }
+});
+
+// 模式切换
+document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => switchMode(tab.dataset.mode));
+});
+
+// 建索引
+$("index-btn").addEventListener("click", () => buildIndex(false));
+$("rebuild-btn").addEventListener("click", () => {
+    if (confirm(t("index.rebuildConfirm"))) {
+        buildIndex(true);
+    }
+});
+
+// 输出区事件委托：图片放大 / 引用角标跳转 / 引用卡片展开
+$("output").addEventListener("click", (e) => {
+    const thumb = e.target.closest(".thumb-btn");
+    if (thumb) {
+        openLightbox(thumb.dataset.full || "", thumb.dataset.cap || "");
+        return;
+    }
+    // 网页引用的外链：交给浏览器默认行为（新窗口打开），
+    // 但必须阻止冒泡 —— 否则会触发站内的引用展开/折叠逻辑
+    const link = e.target.closest(".cite-link");
+    if (link) {
+        e.stopPropagation();
+        return;
+    }
+    const ref = e.target.closest(".cite-ref");
+    if (ref) {
+        focusCitation(Number(ref.dataset.cite), scopeOf(ref));
+        return;
+    }
+    const toggle = e.target.closest(".cite-toggle");
+    if (toggle) toggleCitation(toggle);
+});
+
+/* ------------------------------ 多轮对话 ------------------------------ */
+
+// 发送 / 停止
+$("chat-send-btn").addEventListener("click", sendChat);
+$("chat-stop-btn").addEventListener("click", () => {
+    if (state.chatAbort) {
+        state.chatAbort.abort();
+        state.chatAbort = null;
+    }
+});
+
+// Enter 发送，Shift+Enter 换行
+$("chat-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendChat();
+    }
+});
+$("chat-input").addEventListener("input", autoGrowChatInput);
+
+// 改写追问开关
+$("use-condense").addEventListener("change", (e) => {
+    state.condense = e.target.checked;
+    if (!state.condense) {
+        showNotice("已关闭追问改写：「那第二点呢」这类追问可能检索不到内容。", "warn");
+    } else {
+        clearNotice();
+    }
+});
+
+// 新对话（顶部 + 侧栏两个入口）
+$("chat-new-btn").addEventListener("click", newConversation);
+$("conv-new-btn").addEventListener("click", newConversation);
+
+// 会话列表：打开 / 删除
+$("conv-list").addEventListener("click", (e) => {
+    const del = e.target.closest("[data-conv-del]");
+    if (del) {
+        removeConversation(del.dataset.convDel, e);
+        return;
+    }
+    const open = e.target.closest("[data-conv-open]");
+    if (open) openConversation(open.dataset.convOpen);
+});
+
+// 对话消息区事件委托：图片放大 / 引用角标（按轮次作用域定位）/ 引用展开
+$("chat-stream").addEventListener("click", (e) => {
+    const thumb = e.target.closest(".thumb-btn");
+    if (thumb) {
+        openLightbox(thumb.dataset.full || "", thumb.dataset.cap || "");
+        return;
+    }
+    // 网页引用的外链：交给浏览器默认行为（新窗口打开），
+    // 但必须阻止冒泡 —— 否则会触发站内的引用展开/折叠逻辑
+    const link = e.target.closest(".cite-link");
+    if (link) {
+        e.stopPropagation();
+        return;
+    }
+    const ref = e.target.closest(".cite-ref");
+    if (ref) {
+        focusCitation(Number(ref.dataset.cite), scopeOf(ref));
+        return;
+    }
+    const toggle = e.target.closest(".cite-toggle");
+    if (toggle) toggleCitation(toggle);
+});
+
+// 切换生成模型（本地）
+$("llm-select").addEventListener("change", (e) => switchModel(e.target.value));
+
+// 切换生成模型来源（本地离线 / 云端 API）
+document.querySelectorAll("#provider-seg .seg-btn").forEach((btn) => {
+    btn.addEventListener("click", () => setProvider(btn.dataset.provider));
+});
+
+// 云端配置
+$("cloud-config-btn").addEventListener("click", openCloudModal);
+$("cloud-modal-close").addEventListener("click", closeCloudModal);
+$("cloud-cancel-btn").addEventListener("click", closeCloudModal);
+$("cloud-test-btn").addEventListener("click", testCloud);
+$("cloud-save-btn").addEventListener("click", saveCloud);
+$("cloud-clear-btn").addEventListener("click", clearCloud);
+
+// 点遮罩关闭（点内容区不关）
+$("cloud-modal").addEventListener("click", (e) => {
+    if (e.target === $("cloud-modal")) closeCloudModal();
+});
+
+// 图片放大：点任意处关闭
+$("lightbox").addEventListener("click", closeLightbox);
+
+// ESC 优先关放大，其次关模态框
+document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    // 优先级：放大图 > 云端配置（叠在设置之上）> 设置面板
+    if (state.lightboxOpen) {
+        closeLightbox();
+    } else if (!$("cloud-modal").hidden) {
+        closeCloudModal();
+    } else if (!$("settings-backdrop").hidden) {
+        closeSettings();
+    }
+});
+
+/* ==========================================================================
+ * 设置 / 主题 / 国际化
+ * ==========================================================================
+ *
+ * i18n 的取舍（有意为之）
+ * ----------------------
+ * 翻译**静态界面文案**：按钮、面板标题、标签、提示、确认框、常见 toast。
+ *
+ * **不翻译**：文档名、模型名、后端返回的错误详情、用户与模型的对话内容。
+ * 理由：这些是「数据」而不是「界面」。文档名往往本身就是中文文件名，
+ * 强行翻译只会让用户对不上号；模型名是标识符；后端错误详情是诊断信息，
+ * 翻译反而妨碍搜索与求助。这个边界是刻意的。
+ */
+
+const I18N = {
+    zh: {
+        "brand.sub": "本地知识库检索问答",
+
+        "provider.local": "本地离线",
+        "provider.cloud": "云端 API",
+        "model.label": "生成模型",
+        "pill.connecting": "连接中…",
+
+        "panel.index": "索引状态",
+        "panel.docs": "文档清单",
+        "panel.convs": "会话",
+
+        "index.chunks": "已索引 Chunk",
+        "index.bm25": "BM25 索引",
+        "index.model": "生成模型",
+        "index.build": "构建索引",
+        "index.rebuild": "重建索引",
+        "index.ready": "已就绪",
+        "index.missing": "未构建",
+        "index.running": "构建中…",
+        "index.rebuildConfirm": "重建会重新向量化全部文档，耗时约 2 分钟。确定继续吗？",
+        "index.started": "已开始构建索引…",
+        "index.failed": "构建失败：",
+
+        "common.loading": "加载中…",
+        "common.on": "开",
+        "common.off": "关",
+        "common.available": "可用",
+        "common.unavailable": "不可用",
+        "common.expand": "展开",
+
+        "conv.new": "＋ 新对话",
+        "conv.empty": "暂无会话",
+        "conv.turns": " 轮",
+        "conv.deleteConfirm": "确定删除这个会话吗？",
+        "conv.untitled": "新对话",
+
+        "settings.open": "设置",
+        "settings.title": "设置",
+        "settings.reset": "恢复默认",
+        "settings.resetConfirm": "确定把所有设置恢复为默认值吗？",
+        "settings.resetDone": "已恢复默认设置。",
+        "settings.nav.general": "通用",
+        "settings.nav.model": "模型",
+        "settings.nav.retrieval": "检索",
+        "settings.nav.chat": "对话",
+        "settings.nav.usage": "用量",
+        "settings.nav.about": "关于",
+
+        "settings.language": "语言",
+        "settings.languageHint": "界面语言。文档名、模型名与对话内容不受影响。",
+        "settings.appearance": "外观",
+        "settings.appearanceHint": "选择「跟随系统」时会随操作系统主题实时切换。",
+        "settings.theme.light": "浅色",
+        "settings.theme.dark": "深色",
+        "settings.theme.system": "跟随系统",
+        "settings.fontSize": "字号大小",
+        "settings.fontSizeHint": "仅影响对话与回答内容的字号。",
+
+        "settings.localModel": "本地模型",
+        "settings.currentModel": "当前生效模型",
+        "settings.cloudApi": "云端 API",
+        "settings.cloudState": "连接配置",
+        "settings.cloudConfig": "配置",
+        "settings.cloudNotConfigured": "尚未配置",
+        "settings.cloudConfigured": "已配置",
+
+        "settings.topkHint": "最终送入模型的参考片段数量。",
+        "settings.bm25Hint": "关键词检索，与向量检索融合（RRF）。",
+        "settings.rerankHint": "用向量重排候选，结果更准但略慢。",
+        "settings.imagesHint": "把图片描述一并纳入检索结果。",
+        "settings.minRelevance": "相关性下限",
+        "settings.minRelevanceHint":
+            "低于此分数视为「没有相关资料」，改为用模型自身知识自然回答。设为 0 关闭过滤。",
+
+        "settings.defaultMode": "默认档位",
+        "settings.defaultModeHint": "快速档关闭思考过程，响应更快。",
+        "settings.condenseHint":
+            "先用模型把「那第二点呢」这类追问改写成独立可检索的查询。",
+        "settings.streamHint": "逐字显示回答，无需等待整段生成完毕。",
+
+        "settings.usageByModel": "按模型",
+        "settings.usageByKind": "按类型",
+        "settings.usageByDay": "最近 14 天",
+        "settings.usageReset": "重置统计",
+        "settings.usageResetHint": "清空累计的调用次数与 token 计数，不可撤销。",
+        "settings.usageResetBtn": "重置统计",
+        "settings.usageResetConfirm": "确定清空全部用量统计吗？此操作不可撤销。",
+        "settings.usageResetDone": "用量统计已重置。",
+
+        "usage.calls": "调用次数",
+        "usage.prompt": "Prompt",
+        "usage.completion": "Completion",
+        "usage.total": "合计",
+        "usage.empty": "暂无用量记录。",
+        "usage.colName": "名称",
+        "usage.colCalls": "次数",
+        "usage.colPrompt": "Prompt",
+        "usage.colCompletion": "Completion",
+        "usage.colTotal": "合计",
+        "usage.kind.chat": "对话",
+        "usage.kind.ask": "问答",
+        "usage.kind.condense": "追问改写",
+        "usage.kind.router": "路由",
+
+        "about.version": "版本",
+        "about.path": "项目路径",
+        "about.embedding": "Embedding 模型",
+        "about.llm": "生成模型",
+        "about.collection": "集合",
+        "about.chunks": "已索引 Chunk",
+        "about.provider": "模型来源",
+        "about.theme": "当前主题",
+
+        "tab.search": "检索",
+        "tab.ask": "问答",
+        "tab.chat": "对话",
+
+        "opt.condense": "改写追问",
+        "opt.condenseTitle":
+            "开启后，会先用模型把「那第二点呢」这类追问改写成独立可检索的查询。关闭后追问可能检索不到内容。",
+        "opt.mode": "档位",
+        "opt.modeTitle":
+            "快速：关闭思考过程，响应更快；精确：开启思考，答案更严谨。",
+        "opt.stream": "流式输出",
+        "opt.bm25": "BM25",
+        "opt.rerank": "Rerank",
+        "opt.images": "包含图片",
+        "opt.imagesTitle": "把图片类知识一并纳入检索结果（需要索引时已处理图片）",
+        "opt.topk": "TopK",
+
+        "mode.fast": "快速",
+        "mode.precise": "精确",
+
+        "query.placeholder": "输入问题，例如：nmap 的 -sS 参数是什么？",
+        "chat.placeholder": "输入问题…（Enter 发送，Shift+Enter 换行）",
+        "btn.search": "搜索",
+        "btn.stop": "停止",
+        "chat.send": "发送",
+        "context.summary": "拼接后的 Context",
+
+
+        "cloud.title": "云端 API 配置",
+        "cloud.note":
+            "任意 OpenAI 兼容端点均可：OpenAI、DeepSeek、Moonshot、通义、智谱、Ollama、LM Studio、vLLM 等。",
+        "cloud.model": "模型名",
+        "cloud.apiKeyPlaceholder": "留空表示不修改",
+        "cloud.test": "测试连接",
+        "cloud.delete": "删除配置",
+        "cloud.cancel": "取消",
+        "cloud.save": "保存",
+
+        "doc.group.markdown": "Markdown",
+        "doc.group.pdf": "PDF",
+        "doc.group.image": "图片",
+        "doc.group.text": "文本",
+        "doc.empty": "暂无文档",
+        "doc.emptyGroup": "暂无文件",
+        "doc.pendingBuild": "去构建",
+        "doc.pending": " 个文件尚未索引",
+        "doc.pendingHint": "重建索引后即可检索",
+        "doc.indexed": "已索引",
+        "doc.notIndexed": "未索引",
+        "doc.detail": "文档详情",
+        "pill.embeddingReady": "Embedding 模型已就绪",
+        "pill.embeddingMissing": "Embedding 模型文件缺失，无法建索引",
+        "pill.indexing": "索引构建中…",
+        "pill.indexedPrefix": "已索引",
+        "pill.indexingTitle": "后台正在构建索引",
+        "pill.llmUnavailable": "LLM 不可用",
+        "pill.llmReady": "生成模型可用",
+        "pill.llmUnavailableTitle": "生成模型不可用，将只返回检索结果",
+        "pill.vlmUnavailable": "视觉不可用",
+        "pill.vlmReadyTitle": "视觉模型可用，图片描述由视觉模型生成",
+        "pill.vlmMissingTitle": "视觉模型不可用，图片使用基础描述，质量较低",
+        "pill.noBackend": "无法连接到后端",
+
+        "notice.llmDegraded": "。问答会降级为仅展示检索结果。",
+
+        "common.seconds": " 秒",
+        "common.secondsUnit": "秒",
+        "index.rebuilding": "正在重建索引…已用 ",
+        "index.building": "正在构建索引…已用 ",
+        "index.buildingBackground": "后台正在构建索引…",
+        "index.noteRebuild": "重建会重新向量化全部文档",
+        "index.noteFirst": "首次需加载 embedding 模型",
+
+        "cloud.deleteConfirm": "确定要删除云端配置与 API Key 吗？",
+
+        /* ---------------- 联网搜索 ---------------- */
+        "opt.web": "联网",
+        "opt.webTitle": "联网搜索：把网页结果追加到本地检索之后，再由模型统一作答",
+
+        "settings.nav.web": "联网搜索",
+        "settings.webSearch": "联网搜索",
+        "settings.webEnabled": "启用联网搜索",
+        "settings.webEnabledHint": "把网页搜索结果追加到本地知识库之后，再由模型统一作答。",
+        "settings.webProvider": "搜索后端",
+        "settings.webProviderHint": "默认 Bing，免密钥且国内可用。",
+        "settings.webKey": "API Key",
+        "settings.webKeyHint": "留空表示保持已保存的 Key 不变。",
+        "settings.webKeyPlaceholder": "粘贴 API Key",
+        "settings.webTest": "测试连接",
+        "settings.webTesting": "测试中…",
+        "settings.webTestOk": "连接正常",
+        "settings.webTestFail": "连接失败",
+        "settings.webUrl": "SearXNG 地址",
+        "settings.webUrlHint": "自建实例的地址，例如 http://localhost:8888。",
+        "settings.webLimit": "结果条数",
+        "settings.webLimitHint": "每次最多取回多少条网页结果。",
+        "settings.webFetch": "抓取网页正文",
+        "settings.webFetchHint": "打开后会真正下载网页并抽取正文，内容更完整但更慢；关闭则只用搜索摘要，明显更快。",
+        "settings.webFetchTop": "抓取条数",
+        "settings.webFetchTopHint": "只抓取前 N 条，其余仅用摘要。设为 0 等于不抓正文。",
+        "settings.webProxy": "走系统代理",
+        "settings.webProxyHint": "国内直连拿不到部分站点。若本机已开代理，请保持开启；关闭后可能大量超时。",
+        "settings.webTimeout": "超时",
+        "settings.webTimeoutHint": "单次搜索或抓取页面的最长等待时间。",
+        "settings.webState": "连接状态",
+        "settings.webStateHint": "测试只发一次搜索请求，不会抓取页面。",
+        "settings.webResult": "测试结果",
+        "settings.webClear": "清除配置",
+        "settings.webClearConfirm": "确定要清除联网搜索配置吗？已保存的 API Key 也会一并删除。",
+        "settings.webCleared": "已清除联网配置",
+
+        "web.badge": "网页",
+        "web.engine": "引擎",
+        "web.openLink": "在新窗口打开",
+        "web.chipLocal": "本地",
+        "web.chipWeb": "网页",
+        "web.counts": "本地 {local} 条 · 网页 {web} 条",
+        "web.searching": "正在联网搜索…",
+        "web.disabled": "联网搜索未启用",
+        "web.fetched": "已抓正文 {n} 篇",
+        "web.error": "联网搜索失败：",
+        "web.noKey": "该后端需要 API Key",
+        "web.testSamples": "样例结果",
+        "web.ok": "正常",
+        "web.fail": "失败",
+
+        "doc.loadFailed": "加载失败：",
+    },
+
+    en: {
+        "brand.sub": "Local knowledge base Q&A",
+
+        "provider.local": "Local",
+        "provider.cloud": "Cloud API",
+        "model.label": "Model",
+        "pill.connecting": "Connecting…",
+
+        "panel.index": "Index status",
+        "panel.docs": "Documents",
+        "panel.convs": "Chats",
+
+        "index.chunks": "Indexed chunks",
+        "index.bm25": "BM25 index",
+        "index.model": "Model",
+        "index.build": "Build index",
+        "index.rebuild": "Rebuild index",
+        "index.ready": "Ready",
+        "index.missing": "Not built",
+        "index.running": "Building…",
+        "index.rebuildConfirm":
+            "Rebuilding re-embeds every document and takes about 2 minutes. Continue?",
+        "index.started": "Index build started…",
+        "index.failed": "Build failed: ",
+
+        "common.loading": "Loading…",
+        "common.on": "On",
+        "common.off": "Off",
+        "common.available": "available",
+        "common.unavailable": "unavailable",
+        "common.expand": "Expand",
+
+        "conv.new": "+ New chat",
+        "conv.empty": "No chats yet",
+        "conv.turns": " turns",
+        "conv.deleteConfirm": "Delete this chat?",
+        "conv.untitled": "New chat",
+
+        "settings.open": "Settings",
+        "settings.title": "Settings",
+        "settings.reset": "Restore defaults",
+        "settings.resetConfirm": "Restore all settings to their defaults?",
+        "settings.resetDone": "Settings restored to defaults.",
+        "settings.nav.general": "General",
+        "settings.nav.model": "Model",
+        "settings.nav.retrieval": "Retrieval",
+        "settings.nav.chat": "Chat",
+        "settings.nav.usage": "Usage",
+        "settings.nav.about": "About",
+
+        "settings.language": "Language",
+        "settings.languageHint":
+            "Interface language. Document names, model names and chat content are unaffected.",
+        "settings.appearance": "Appearance",
+        "settings.appearanceHint":
+            "“Follow system” tracks your operating system theme in real time.",
+        "settings.theme.light": "Light",
+        "settings.theme.dark": "Dark",
+        "settings.theme.system": "System",
+        "settings.fontSize": "Font size",
+        "settings.fontSizeHint": "Affects chat and answer content only.",
+
+        "settings.localModel": "Local model",
+        "settings.currentModel": "Active model",
+        "settings.cloudApi": "Cloud API",
+        "settings.cloudState": "Connection",
+        "settings.cloudConfig": "Configure",
+        "settings.cloudNotConfigured": "Not configured",
+        "settings.cloudConfigured": "Configured",
+
+        "settings.topkHint": "Number of passages finally sent to the model.",
+        "settings.bm25Hint": "Keyword search fused with vector search (RRF).",
+        "settings.rerankHint": "Re-rank candidates by vector; more accurate, slightly slower.",
+        "settings.imagesHint": "Include image descriptions in retrieval results.",
+        "settings.minRelevance": "Relevance floor",
+        "settings.minRelevanceHint":
+            "Results below this score count as “no relevant material”, and the model answers from its own knowledge instead. Set to 0 to disable.",
+
+        "settings.defaultMode": "Default mode",
+        "settings.defaultModeHint": "Fast mode skips the reasoning pass and responds sooner.",
+        "settings.condenseHint":
+            "Rewrite follow-ups like “what about the second one?” into standalone queries first.",
+        "settings.streamHint": "Stream the answer token by token instead of waiting for all of it.",
+
+        "settings.usageByModel": "By model",
+        "settings.usageByKind": "By kind",
+        "settings.usageByDay": "Last 14 days",
+        "settings.usageReset": "Reset usage",
+        "settings.usageResetHint":
+            "Clear accumulated call counts and token counters. This cannot be undone.",
+        "settings.usageResetBtn": "Reset usage",
+        "settings.usageResetConfirm":
+            "Clear all usage statistics? This cannot be undone.",
+        "settings.usageResetDone": "Usage statistics reset.",
+
+        "usage.calls": "Calls",
+        "usage.prompt": "Prompt",
+        "usage.completion": "Completion",
+        "usage.total": "Total",
+        "usage.empty": "No usage recorded yet.",
+        "usage.colName": "Name",
+        "usage.colCalls": "Calls",
+        "usage.colPrompt": "Prompt",
+        "usage.colCompletion": "Completion",
+        "usage.colTotal": "Total",
+        "usage.kind.chat": "Chat",
+        "usage.kind.ask": "Q&A",
+        "usage.kind.condense": "Condense",
+        "usage.kind.router": "Router",
+
+        "about.version": "Version",
+        "about.path": "Project path",
+        "about.embedding": "Embedding model",
+        "about.llm": "Chat model",
+        "about.collection": "Collection",
+        "about.chunks": "Indexed chunks",
+        "about.provider": "Model source",
+        "about.theme": "Theme",
+
+        "tab.search": "Search",
+        "tab.ask": "Q&A",
+        "tab.chat": "Chat",
+
+        "opt.condense": "Rewrite follow-ups",
+        "opt.condenseTitle":
+            "Rewrite follow-ups such as “what about the second one?” into standalone retrieval queries first. Without it, follow-ups may retrieve nothing.",
+        "opt.mode": "Mode",
+        "opt.modeTitle":
+            "Fast: skips reasoning and responds sooner. Precise: enables reasoning for a more rigorous answer.",
+        "opt.stream": "Stream",
+        "opt.bm25": "BM25",
+        "opt.rerank": "Rerank",
+        "opt.images": "Images",
+        "opt.imagesTitle":
+            "Include image knowledge in results (requires images to have been indexed).",
+        "opt.topk": "TopK",
+
+        "mode.fast": "Fast",
+        "mode.precise": "Precise",
+
+        "query.placeholder": "Ask a question, e.g. what does nmap -sS do?",
+        "chat.placeholder": "Type a message… (Enter to send, Shift+Enter for newline)",
+        "btn.search": "Search",
+        "btn.stop": "Stop",
+        "chat.send": "Send",
+        "context.summary": "Assembled context",
+
+        "cloud.title": "Cloud API configuration",
+        "cloud.note":
+            "Any OpenAI-compatible endpoint works: OpenAI, DeepSeek, Moonshot, Qwen, Zhipu, Ollama, LM Studio, vLLM, etc.",
+        "cloud.model": "Model name",
+        "cloud.apiKeyPlaceholder": "Leave blank to keep unchanged",
+        "cloud.test": "Test connection",
+        "cloud.delete": "Delete config",
+        "cloud.cancel": "Cancel",
+        "cloud.save": "Save",
+
+        "doc.group.markdown": "Markdown",
+        "doc.group.pdf": "PDF",
+        "doc.group.image": "Images",
+        "doc.group.text": "Text",
+        "doc.empty": "No documents",
+        "doc.emptyGroup": "No files",
+        "doc.pendingBuild": "Build now",
+        "doc.pending": " file(s) not indexed yet",
+        "doc.pendingHint": "Rebuild the index to make them searchable",
+        "doc.indexed": "Indexed",
+        "doc.notIndexed": "Not indexed",
+        "doc.detail": "Document details",
+        "pill.embeddingReady": "Embedding model ready",
+        "pill.embeddingMissing": "Embedding model file missing; cannot build index",
+        "pill.indexing": "Building index…",
+        "pill.indexedPrefix": "Indexed",
+        "pill.indexingTitle": "Index build running in the background",
+        "pill.llmUnavailable": "LLM unavailable",
+        "pill.llmReady": "Model available",
+        "pill.llmUnavailableTitle":
+            "Model unavailable; retrieval results will be shown without an answer",
+        "pill.vlmUnavailable": "Vision unavailable",
+        "pill.vlmReadyTitle":
+            "Vision model available; image captions are generated by it",
+        "pill.vlmMissingTitle":
+            "Vision model unavailable; images use basic captions of lower quality",
+        "pill.noBackend": "Cannot reach the backend",
+
+        "notice.llmDegraded":
+            ". Q&A will degrade to showing retrieval results only.",
+
+        "common.seconds": " s",
+        "common.secondsUnit": "s",
+        "index.rebuilding": "Rebuilding index… elapsed ",
+        "index.building": "Building index… elapsed ",
+        "index.buildingBackground": "Index build running in the background…",
+        "index.noteRebuild": "every document is re-embedded",
+        "index.noteFirst": "the embedding model loads on first run",
+
+        "cloud.deleteConfirm": "Delete the cloud configuration and API key?",
+
+        /* ---------------- Web search ---------------- */
+        "opt.web": "Web",
+        "opt.webTitle": "Web search: append web results after local retrieval, then let the model answer once",
+
+        "settings.nav.web": "Web Search",
+        "settings.webSearch": "Web Search",
+        "settings.webEnabled": "Enable web search",
+        "settings.webEnabledHint": "Append web results after the local knowledge base, then let the model answer once.",
+        "settings.webProvider": "Search backend",
+        "settings.webProviderHint": "Bing by default — no API key needed and reachable from mainland China.",
+        "settings.webKey": "API Key",
+        "settings.webKeyHint": "Leave blank to keep the saved key unchanged.",
+        "settings.webKeyPlaceholder": "Paste your API key",
+        "settings.webTest": "Test",
+        "settings.webTesting": "Testing…",
+        "settings.webTestOk": "Connection OK",
+        "settings.webTestFail": "Connection failed",
+        "settings.webUrl": "SearXNG URL",
+        "settings.webUrlHint": "Address of your instance, e.g. http://localhost:8888.",
+        "settings.webLimit": "Results",
+        "settings.webLimitHint": "How many web results to fetch per search.",
+        "settings.webFetch": "Fetch page content",
+        "settings.webFetchHint": "Downloads the pages and extracts the body — richer context but slower. Off uses snippets only and is much faster.",
+        "settings.webFetchTop": "Pages to fetch",
+        "settings.webFetchTopHint": "Only the first N pages are fetched; the rest use snippets. 0 means never fetch.",
+        "settings.webProxy": "Use system proxy",
+        "settings.webProxyHint": "Some sites are unreachable without a proxy. Keep this on if your machine already uses one; turning it off may cause many timeouts.",
+        "settings.webTimeout": "Timeout",
+        "settings.webTimeoutHint": "Maximum wait for a single search or page fetch.",
+        "settings.webState": "Connection",
+        "settings.webStateHint": "The test sends a single search request and does not fetch any page.",
+        "settings.webResult": "Test result",
+        "settings.webClear": "Clear",
+        "settings.webClearConfirm": "Clear the web search configuration? The saved API key will be deleted too.",
+        "settings.webCleared": "Web configuration cleared",
+
+        "web.badge": "WEB",
+        "web.engine": "Engine",
+        "web.openLink": "Open in a new tab",
+        "web.chipLocal": "Local",
+        "web.chipWeb": "Web",
+        "web.counts": "{local} local · {web} web",
+        "web.searching": "Searching the web…",
+        "web.disabled": "Web search is off",
+        "web.fetched": "{n} pages fetched",
+        "web.error": "Web search failed: ",
+        "web.noKey": "This backend needs an API key",
+        "web.testSamples": "Sample results",
+        "web.ok": "OK",
+        "web.fail": "Failed",
+
+        "doc.loadFailed": "Load failed: ",
+    },
+};
+
+/** 当前语言。由设置面板与 /api/settings 驱动。 */
+let currentLanguage = "zh";
+
+/**
+ * 取翻译。
+ *
+ * 找不到 key 时**回退到 key 本身**而不是抛错 —— 界面上出现一个英文 key
+ * 远好过整块 UI 因为一个笔误而渲染不出来。
+ */
+function t(key, fallback) {
+    const table = I18N[currentLanguage] || I18N.zh;
+    if (Object.prototype.hasOwnProperty.call(table, key)) return table[key];
+
+    const zh = I18N.zh;
+    if (Object.prototype.hasOwnProperty.call(zh, key)) return zh[key];
+
+    return fallback !== undefined ? fallback : key;
+}
+
+/**
+ * 把静态文案写进带 data-i18n* 标注的元素。
+ *
+ * 可在任意子树重复调用（例如语言切换后重渲染某块动态内容）。
+ */
+function applyI18n(root) {
+    const scope = root || document;
+
+    scope.querySelectorAll("[data-i18n]").forEach((el) => {
+        el.textContent = t(el.dataset.i18n);
+    });
+
+    scope.querySelectorAll("[data-i18n-title]").forEach((el) => {
+        el.title = t(el.dataset.i18nTitle);
+    });
+
+    scope.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+        el.placeholder = t(el.dataset.i18nPlaceholder);
+    });
+
+    scope.querySelectorAll("[data-i18n-aria]").forEach((el) => {
+        el.setAttribute("aria-label", t(el.dataset.i18nAria));
+    });
+}
+
+/* ==========================================================================
+ * 主题
+ * ========================================================================== */
+
+const THEMES = ["light", "dark", "system"];
+
+/**
+ * 把设置里的主题值解析成实际生效的明暗。
+ *
+ * ``system`` 需要外部告知系统偏好，因此把 ``prefersLight`` 作为参数传入
+ * —— 这样这个函数是纯函数，可以脱离浏览器直接跑断言。
+ */
+function resolveTheme(value, prefersLight) {
+    if (value === "light") return "light";
+    if (value === "dark") return "dark";
+    return prefersLight ? "light" : "dark";
+}
+
+const SYSTEM_LIGHT_QUERY = "(prefers-color-scheme: light)";
+
+/** 监听系统主题变化：选「跟随系统」时要实时跟随 */
+function watchSystemTheme() {
+    if (!window.matchMedia) return;
+    const mq = window.matchMedia(SYSTEM_LIGHT_QUERY);
+    const handler = () => {
+        if (settingsState.data &&
+            settingsState.data.general &&
+            settingsState.data.general.theme === "system") {
+            applyTheme("system");
+        }
+    };
+    if (mq.addEventListener) mq.addEventListener("change", handler);
+    else if (mq.addListener) mq.addListener(handler);
+}
+
+function systemPrefersLight() {
+    if (!window.matchMedia) return false;
+    return window.matchMedia(SYSTEM_LIGHT_QUERY).matches;
+}
+
+function applyTheme(value) {
+    const theme = resolveTheme(value, systemPrefersLight());
+
+    document.documentElement.dataset.theme = theme;
+
+    // 同步设置面板里的大按钮选中态
+    document.querySelectorAll("#theme-picker .theme-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.themeValue === value);
+    });
+
+    return theme;
+}
+
+/* ==========================================================================
+ * 设置
+ * ========================================================================== */
+
+const settingsState = {
+    data: null,      // 服务端返回的完整设置
+    defaults: null,  // 默认值
+    usage: null,     // 用量统计
+    pane: "general", // 当前分类
+};
+
+async function loadSettings() {
+    try {
+        const res = await api("/api/settings");
+        settingsState.data = res.settings;
+        settingsState.defaults = res.defaults;
+        applySettingsToUi();
+        return res.settings;
+    } catch (err) {
+        // 设置拉不到不应阻断整个页面
+        console.warn("读取设置失败：", err);
+        return null;
+    }
+}
+
+/** 把设置值灌进顶栏控件与设置面板 */
+function applySettingsToUi() {
+    const s = settingsState.data;
+    if (!s) return;
+
+    const general = s.general || {};
+    const retrieval = s.retrieval || {};
+    const chat = s.chat || {};
+
+    // ---- 语言 ----
+    currentLanguage = general.language === "en" ? "en" : "zh";
+    document.documentElement.lang = currentLanguage === "en" ? "en" : "zh-CN";
+    const langSel = $("settings-language");
+    if (langSel) langSel.value = currentLanguage;
+    applyI18n();
+
+    // ---- 主题 ----
+    applyTheme(general.theme || "dark");
+
+    // ---- 字号 ----
+    const size = Number(general.font_size);
+    document.documentElement.style.setProperty(
+        "--font-size",
+        (Number.isFinite(size) ? size : 14) + "px"
+    );
+    const sizeInput = $("settings-font-size");
+    if (sizeInput) sizeInput.value = String(Number.isFinite(size) ? size : 14);
+
+    // ---- 检索：同步顶栏控件 + 设置面板控件 ----
+    setCheckbox("use-bm25", retrieval.use_bm25);
+    setCheckbox("use-reranker", retrieval.use_reranker);
+    setCheckbox("include-images", retrieval.include_images);
+    setSelect("top-k", retrieval.top_k);
+
+    setCheckbox("settings-use-bm25", retrieval.use_bm25);
+    setCheckbox("settings-use-reranker", retrieval.use_reranker);
+    setCheckbox("settings-include-images", retrieval.include_images);
+    setSelect("settings-top-k", retrieval.top_k);
+    const minRel = $("settings-min-relevance");
+    if (minRel) minRel.value = String(retrieval.min_relevance);
+
+    // ---- 对话 ----
+    setSelect("answer-mode", chat.mode);
+    setCheckbox("use-condense", chat.condense);
+    setCheckbox("use-stream", chat.stream);
+
+    setSelect("settings-chat-mode", chat.mode);
+    setCheckbox("settings-condense", chat.condense);
+    setCheckbox("settings-stream", chat.stream);
+
+    updateSettingsHints();
+}
+
+function setCheckbox(id, value) {
+    const el = $(id);
+    if (el && typeof value === "boolean") el.checked = value;
+}
+
+function setSelect(id, value) {
+    const el = $(id);
+    if (!el || value === undefined || value === null) return;
+    const target = String(value);
+    if (Array.from(el.options).some((o) => o.value === target)) {
+        el.value = target;
+    }
+}
+
+/** 设置面板里那些「由后端状态决定」的说明文字 */
+function updateSettingsHints() {
+    const s = settingsState.data;
+    if (!s) return;
+
+    const modelHint = $("settings-model-hint");
+    if (modelHint) {
+        const sel = $("settings-model-select");
+        modelHint.textContent = sel && sel.value ? sel.value : "—";
+    }
+
+    const cloudHint = $("settings-cloud-hint");
+    if (cloudHint) {
+        const configured = !!(state.cloud && state.cloud.configured);
+        cloudHint.textContent = configured
+            ? t("settings.cloudConfigured") + "：" +
+              [state.cloud.model, state.cloud.base_url].filter(Boolean).join(" @ ")
+            : t("settings.cloudNotConfigured");
+    }
+}
+
+/** 只提交要改的字段；后端会忽略非法值并返回最新完整设置 */
+async function patchSettings(section, values) {
+    try {
+        const payload = {};
+        payload[section] = values;
+        const res = await api("/api/settings", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        settingsState.data = res.settings;
+        return res.settings;
+    } catch (err) {
+        showNotice("保存设置失败：" + (err.message || err), "err");
+        return null;
+    }
+}
+
+async function resetSettings() {
+    if (!confirm(t("settings.resetConfirm"))) return;
+    try {
+        const res = await api("/api/settings/reset", jsonPost({}));
+        settingsState.data = res.settings;
+        applySettingsToUi();
+        showNotice(t("settings.resetDone"), "ok");
+    } catch (err) {
+        showNotice("恢复默认失败：" + (err.message || err), "err");
+    }
+}
+
+/* ------------------------------ 设置面板开关 ------------------------------ */
+
+function openSettings(pane) {
+    $("settings-backdrop").hidden = false;
+    document.body.classList.add("modal-open");
+    switchSettingsPane(pane || settingsState.pane || "general");
+    updateSettingsHints();
+    loadUsage();
+}
+
+function closeSettings() {
+    $("settings-backdrop").hidden = true;
+    document.body.classList.remove("modal-open");
+}
+
+function switchSettingsPane(name) {
+    settingsState.pane = name;
+
+    document.querySelectorAll("#settings-nav .settings-nav-item").forEach((b) => {
+        b.classList.toggle("active", b.dataset.pane === name);
+    });
+
+    document.querySelectorAll(".settings-pane").forEach((p) => {
+        p.hidden = p.dataset.pane !== name;
+    });
+
+    if (name === "usage") loadUsage();
+    if (name === "about") renderAbout();
+}
+
+/* ==========================================================================
+ * 用量统计
+ * ========================================================================== */
+
+function fmtInt(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return "0";
+    return v.toLocaleString("en-US");
+}
+
+async function loadUsage() {
+    try {
+        const res = await api("/api/usage?recent_days=14");
+        settingsState.usage = res.usage;
+        renderUsage(res.usage);
+    } catch (err) {
+        const box = $("usage-cards");
+        if (box) box.innerHTML = '<div class="usage-empty">' +
+            escapeHtml(t("doc.loadFailed") + (err.message || err)) + "</div>";
+    }
+}
+
+function usageCardsHtml(totals) {
+    const cells = [
+        ["usage.calls", totals.calls],
+        ["usage.prompt", totals.prompt_tokens],
+        ["usage.completion", totals.completion_tokens],
+        ["usage.total", totals.total_tokens],
+    ];
+
+    return cells.map(([key, value]) =>
+        '<div class="usage-card">' +
+            '<div class="usage-card-value">' + escapeHtml(fmtInt(value)) + "</div>" +
+            '<div class="usage-card-label">' + escapeHtml(t(key)) + "</div>" +
+        "</div>"
+    ).join("");
+}
+
+function usageTableHtml(buckets) {
+    const entries = Object.entries(buckets || {});
+
+    if (!entries.length) {
+        return '<div class="usage-empty">' + escapeHtml(t("usage.empty")) + "</div>";
+    }
+
+    const head =
+        "<tr>" +
+        "<th>" + escapeHtml(t("usage.colName")) + "</th>" +
+        '<th class="num">' + escapeHtml(t("usage.colCalls")) + "</th>" +
+        '<th class="num">' + escapeHtml(t("usage.colPrompt")) + "</th>" +
+        '<th class="num">' + escapeHtml(t("usage.colCompletion")) + "</th>" +
+        '<th class="num">' + escapeHtml(t("usage.colTotal")) + "</th>" +
+        "</tr>";
+
+    const rows = entries.map(([name, v]) => {
+        const label = t("usage.kind." + name, name);
+        return "<tr>" +
+            '<td class="name">' + escapeHtml(label || name) + "</td>" +
+            '<td class="num">' + escapeHtml(fmtInt(v.calls)) + "</td>" +
+            '<td class="num">' + escapeHtml(fmtInt(v.prompt_tokens)) + "</td>" +
+            '<td class="num">' + escapeHtml(fmtInt(v.completion_tokens)) + "</td>" +
+            '<td class="num">' + escapeHtml(fmtInt(v.total_tokens)) + "</td>" +
+        "</tr>";
+    }).join("");
+
+    return '<table class="usage-table"><thead>' + head +
+           "</thead><tbody>" + rows + "</tbody></table>";
+}
+
+function renderUsage(usage) {
+    if (!usage) return;
+
+    const cards = $("usage-cards");
+    if (cards) cards.innerHTML = usageCardsHtml(usage.totals || {});
+
+    const byModel = $("usage-by-model");
+    if (byModel) byModel.innerHTML = usageTableHtml(usage.by_model);
+
+    const byKind = $("usage-by-kind");
+    if (byKind) byKind.innerHTML = usageTableHtml(usage.by_kind);
+
+    const byDay = $("usage-by-day");
+    if (byDay) byDay.innerHTML = usageTableHtml(usage.by_day);
+}
+
+async function resetUsage() {
+    if (!confirm(t("settings.usageResetConfirm"))) return;
+    try {
+        const res = await api("/api/usage/reset", jsonPost({}));
+        settingsState.usage = res.usage;
+        renderUsage(res.usage);
+        showNotice(t("settings.usageResetDone"), "ok");
+    } catch (err) {
+        showNotice("重置失败：" + (err.message || err), "err");
+    }
+}
+
+/* ==========================================================================
+ * 关于
+ * ========================================================================== */
+
+function renderAbout() {
+    const box = $("about-list");
+    if (!box) return;
+
+    const health = state.health || {};
+    const s = settingsState.data || {};
+    const theme = document.documentElement.dataset.theme || "dark";
+
+    const rows = [
+        ["about.version", health.version || "—"],
+        ["about.provider", health.provider || "—"],
+        ["about.embedding", health.embedding_model || health.embedding || "—"],
+        ["about.llm", health.llm_model || health.llm || "—"],
+        ["about.collection", health.collection || "—"],
+        ["about.chunks", fmtInt(health.indexed_chunks)],
+        ["about.theme", theme],
+        ["about.path", health.project_root || health.root || "—"],
+    ];
+
+    box.innerHTML = rows.map(([key, value]) =>
+        '<div class="about-row">' +
+            '<div class="about-key">' + escapeHtml(t(key)) + "</div>" +
+            '<div class="about-val">' + escapeHtml(value) + "</div>" +
+        "</div>"
+    ).join("");
+}
+
+/* ==========================================================================
+ * 模型选择（设置面板内，与顶栏共用同一份数据）
+ * ========================================================================== */
+
+function syncModelSelectors(models, active) {
+    const selectors = [$("llm-select"), $("settings-model-select")];
+
+    selectors.forEach((sel) => {
+        if (!sel) return;
+        sel.innerHTML = "";
+
+        (models || []).forEach((m) => {
+            const opt = document.createElement("option");
+            opt.value = m.file || m.name;
+            opt.textContent = m.label || m.name || m.file;
+            sel.appendChild(opt);
+        });
+
+        if (active) sel.value = active;
+        // 切换事件由各自的 addEventListener 负责，这里不设置 onchange，
+        // 否则会与 addEventListener 一起把 switchModel 触发两次。
+    });
+
+    updateSettingsHints();
+}
+
+
+/* ==========================================================================
+ * 联网搜索
+ *
+ * 后端把网页结果**追加**在本地检索之后，引用列表里两类混在一起。
+ * 前端要做的三件事：
+ *   1. 三处「联网」开关联动（检索 / 问答 / 对话各一个）
+ *   2. 设置面板里配置后端、Key、抓取策略
+ *   3. 引用卡片区分网页与本地 —— 网页要能点开外链
+ * ========================================================================== */
+
+const webState = {
+    config: null,     // /api/web/config 的 config
+    providers: [],    // 后端支持的后端清单
+    testing: false,
+};
+
+/** 三个联网开关的 id（检索 / 问答 / 对话各一个，需联动） */
+const WEB_SWITCH_IDS = ["use-web-search", "use-web-ask", "use-web-chat"];
+
+/**
+ * 只允许 http / https 的 URL，否则返回空串。
+ *
+ * 后端已经过滤过一遍，这里再兜一次：引用里的 url 来自**外部网页**，
+ * 属于不可信数据。`javascript:` / `data:` 一旦进了 href 就是 XSS 入口。
+ */
+function safeHttpUrl(url) {
+    if (typeof url !== "string") return "";
+    const s = url.trim();
+    if (!s) return "";
+    try {
+        const parsed = new URL(s);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+            return "";
+        }
+        return parsed.href;
+    } catch (_) {
+        return "";
+    }
+}
+
+/** 是否网页引用。后端给了 is_web，同时兼容 source_type。 */
+function isWebCitation(c) {
+    if (!c) return false;
+    if (c.is_web === true) return true;
+    return c.source_type === "web";
+}
+
+/** 引用所属域名，取不到就回退到后端给的 domain */
+function citationDomain(c) {
+    if (c && c.domain) return String(c.domain);
+    const href = safeHttpUrl(c && c.url);
+    if (!href) return "";
+    try {
+        return new URL(href).hostname;
+    } catch (_) {
+        return "";
+    }
+}
+
+/** 极简 {name} 占位替换（用于 web.counts 这类带计数的文案） */
+function fmtTemplate(text, values) {
+    return String(text).replace(/\{(\w+)\}/g, (whole, key) =>
+        Object.prototype.hasOwnProperty.call(values, key)
+            ? String(values[key])
+            : whole
+    );
+}
+
+/* ------------------------------ 读取 / 写入 ------------------------------ */
+
+async function loadWebConfig() {
+    try {
+        const res = await api("/api/web/config");
+        webState.config = res.config || null;
+        webState.providers = res.providers || [];
+        applyWebConfigToUi();
+        return webState.config;
+    } catch (err) {
+        // 联网配置拿不到不应阻断页面
+        console.warn("读取联网配置失败：", err);
+        return null;
+    }
+}
+
+async function patchWebConfig(values) {
+    try {
+        const res = await api("/api/web/config", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(values),
+        });
+        webState.config = res.config || webState.config;
+        applyWebConfigToUi();
+        return webState.config;
+    } catch (err) {
+        showNotice(t("web.error") + (err.message || err), "err");
+        return null;
+    }
+}
+
+/** 当前选中的后端定义 */
+function currentWebProvider() {
+    const id = webState.config && webState.config.provider;
+    return webState.providers.find((p) => p.id === id) || null;
+}
+
+/* ------------------------------ 灌入界面 ------------------------------ */
+
+function applyWebConfigToUi() {
+    const c = webState.config;
+    if (!c) return;
+
+    // 后端下拉：只在选项变化时重建，避免打断用户操作
+    const sel = $("settings-web-provider");
+    if (sel) {
+        const want = webState.providers
+            .map((p) => p.id + "|" + p.label)
+            .join(",");
+        if (sel.dataset.sig !== want) {
+            sel.innerHTML = webState.providers
+                .map(
+                    (p) =>
+                        '<option value="' + escapeHtml(p.id) + '">' +
+                        escapeHtml(p.label) + "</option>"
+                )
+                .join("");
+            sel.dataset.sig = want;
+        }
+        if (c.provider) sel.value = c.provider;
+    }
+
+    setCheckbox("settings-web-enabled", !!c.enabled);
+    setCheckbox("settings-web-fetch", !!c.fetch_pages);
+    setCheckbox("settings-web-proxy", !!c.use_proxy);
+
+    setNumberInput("settings-web-limit", c.max_results);
+    setNumberInput("settings-web-fetch-top", c.fetch_top_n);
+    setNumberInput("settings-web-timeout", c.timeout);
+
+    const url = $("settings-web-url");
+    if (url && document.activeElement !== url) {
+        url.value = c.searxng_url || "";
+    }
+
+    // Key 永不回填真实值：placeholder 显示掩码，输入框本身留空。
+    // 提交时留空即「保持不变」。
+    const key = $("settings-web-key");
+    if (key) {
+        const masked = c.has_key ? (c.api_key || "••••") : "";
+        key.placeholder = masked || t("settings.webKeyPlaceholder");
+        if (document.activeElement !== key) key.value = "";
+    }
+
+    // 同步三处开关
+    WEB_SWITCH_IDS.forEach((id) => {
+        const el = $(id);
+        if (el) el.checked = !!c.enabled;
+    });
+
+    updateWebRowsVisibility();
+}
+
+function setNumberInput(id, value) {
+    const el = $(id);
+    if (!el || value === undefined || value === null) return;
+    if (document.activeElement === el) return;
+    el.value = String(value);
+}
+
+/**
+ * 哪些行该显示。
+ *
+ * 两个测试按钮同一时刻只显示一个：需要 Key 的后端按钮跟在 Key 旁边，
+ * 不需要的则放在「连接状态」行 —— 避免出现两个功能重复的按钮。
+ */
+/**
+ * 由「后端定义 + 抓取开关」推导各行的显隐。
+ *
+ * 抽成纯函数是为了能真跑断言 —— 这一层的错误（两个测试按钮同时冒出来、
+ * needs_url 的后端却没显示地址框）在静态检查里完全看不出来。
+ */
+function webRowVisibility(provider, fetchOn) {
+    const p = provider || {};
+    return {
+        keyRow: !!p.needs_key,
+        urlRow: !!p.needs_url,
+        // 两个测试按钮同一时刻只留一个：需要 Key 的跟在 Key 旁边，
+        // 不需要 Key 的放「连接状态」行，避免出现两个功能重复的按钮。
+        testBtn: !!p.needs_key,
+        checkBtn: !p.needs_key,
+        fetchTopRow: !!fetchOn,
+    };
+}
+
+function updateWebRowsVisibility() {
+    const fetch = $("settings-web-fetch");
+    const v = webRowVisibility(currentWebProvider(), !!(fetch && fetch.checked));
+
+    const map = {
+        "settings-web-key-row": v.keyRow,
+        "settings-web-url-row": v.urlRow,
+        "settings-web-test-btn": v.testBtn,
+        "settings-web-check-btn": v.checkBtn,
+        "settings-web-fetch-top-row": v.fetchTopRow,
+    };
+
+    Object.keys(map).forEach((id) => {
+        const el = $(id);
+        if (el) el.hidden = !map[id];
+    });
+}
+
+/* ------------------------------ 三处开关联动 ------------------------------ */
+
+/**
+ * 设置联网开关。
+ *
+ * 三处开关（检索 / 问答 / 对话）必须始终一致，所以统一走这里：
+ * 先把三个都写一遍，再持久化。
+ */
+async function setWebEnabled(enabled, persist) {
+    const value = !!enabled;
+
+    WEB_SWITCH_IDS.forEach((id) => {
+        const el = $(id);
+        if (el) el.checked = value;
+    });
+    setCheckbox("settings-web-enabled", value);
+
+    if (webState.config) webState.config.enabled = value;
+
+    if (persist !== false) await patchWebConfig({ enabled: value });
+}
+
+/* ------------------------------ 测试 / 清除 ------------------------------ */
+
+async function testWebConnection() {
+    if (webState.testing) return;
+    webState.testing = true;
+
+    const btn = $("settings-web-test-btn");
+    const checkBtn = $("settings-web-check-btn");
+    const label = btn ? btn.textContent : "";
+
+    [btn, checkBtn].forEach((b) => {
+        if (b) b.disabled = true;
+    });
+    if (btn) btn.textContent = t("settings.webTesting");
+
+    const box = $("settings-web-result");
+    const body = $("settings-web-result-body");
+    if (box) box.hidden = false;
+    if (body) body.innerHTML = '<div class="web-test-line">' + escapeHtml(t("settings.webTesting")) + "</div>";
+
+    try {
+        // 先把输入框里的 Key / 地址提交上去，否则测试用的还是旧配置。
+        // Key 为空时**不带 api_key 字段** —— 免得把已保存的真 Key 冲掉。
+        const pending = {};
+        const keyEl = $("settings-web-key");
+        const urlEl = $("settings-web-url");
+        const provider = currentWebProvider();
+
+        if (keyEl && keyEl.value.trim()) pending.api_key = keyEl.value.trim();
+        if (urlEl && provider && provider.needs_url) {
+            pending.searxng_url = urlEl.value.trim();
+        }
+        if (Object.keys(pending).length) await patchWebConfig(pending);
+
+        const res = await api("/api/web/test", jsonPost({}));
+        renderWebTestResult(res.result);
+    } catch (err) {
+        renderWebTestResult({ ok: false, error: err.message || String(err) });
+    } finally {
+        webState.testing = false;
+        [btn, checkBtn].forEach((b) => {
+            if (b) b.disabled = false;
+        });
+        if (btn) btn.textContent = label || t("settings.webTest");
+    }
+}
+
+function renderWebTestResult(result) {
+    const box = $("settings-web-result");
+    const body = $("settings-web-result-body");
+    if (!box || !body) return;
+
+    const r = result || {};
+    box.hidden = false;
+
+    const head =
+        '<div class="web-test-line">' +
+        '<span class="web-test-status ' + (r.ok ? "ok" : "err") + '">' +
+        escapeHtml(r.ok ? t("settings.webTestOk") : t("settings.webTestFail")) +
+        "</span>" +
+        (r.provider
+            ? '<span class="web-test-meta">' + escapeHtml(r.provider) + "</span>"
+            : "") +
+        (r.count != null
+            ? '<span class="web-test-meta">' + escapeHtml(r.count) + " " +
+              escapeHtml(t("settings.webLimit")) + "</span>"
+            : "") +
+        (r.elapsed_ms != null
+            ? '<span class="web-test-meta">' + escapeHtml(fmtMs(r.elapsed_ms)) + "</span>"
+            : "") +
+        "</div>";
+
+    let errHtml = "";
+    if (!r.ok && r.error) {
+        errHtml = '<div class="web-test-error">' + escapeHtml(r.error) + "</div>";
+    }
+
+    let samplesHtml = "";
+    const samples = Array.isArray(r.samples) ? r.samples.slice(0, 3) : [];
+    if (samples.length) {
+        samplesHtml =
+            '<div class="web-test-samples-title">' +
+            escapeHtml(t("web.testSamples")) +
+            "</div>" +
+            '<div class="web-test-samples">' +
+            samples
+                .map((s) => {
+                    const href = safeHttpUrl(s.url);
+                    const domain = s.domain || (href ? citationDomain({ url: href }) : "");
+                    return (
+                        '<div class="web-test-sample">' +
+                        '<span class="web-test-sample-title">' +
+                        escapeHtml(s.title || href || "—") +
+                        "</span>" +
+                        (href
+                            ? '<a class="cite-link" href="' + escapeHtml(href) + '"' +
+                              ' target="_blank" rel="noopener noreferrer"' +
+                              ' title="' + escapeHtml(t("web.openLink")) + '">' +
+                              escapeHtml(domain) + "</a>"
+                            : "") +
+                        "</div>"
+                    );
+                })
+                .join("") +
+            "</div>";
+    }
+
+    body.innerHTML = head + errHtml + samplesHtml;
+}
+
+async function clearWebConfig() {
+    if (!confirm(t("settings.webClearConfirm"))) return;
+    try {
+        const res = await api("/api/web/config/clear", jsonPost({}));
+        webState.config = res.config || webState.config;
+        applyWebConfigToUi();
+        const box = $("settings-web-result");
+        if (box) box.hidden = true;
+        showNotice(t("settings.webCleared"), "ok");
+    } catch (err) {
+        showNotice(t("web.error") + (err.message || err), "err");
+    }
+}
+
+/* ------------------------------ 计数展示 ------------------------------ */
+
+/**
+ * 结果计数：「本地 N 条 · 网页 M 条」。
+ *
+ * 只在真的开了联网（或确实有网页结果）时才显示，避免本地检索被这行噪音干扰。
+ */
+function webCountsText(stats) {
+    const s = stats || {};
+    const local = Number(s.local);
+    const web = Number(s.web);
+
+    if (!Number.isFinite(local) || !Number.isFinite(web)) return "";
+    if (!s.use_web && !web) return "";
+
+    return fmtTemplate(t("web.counts"), { local: local, web: web });
+}
+
+/* ==========================================================================
+ * 设置面板事件接线
+ * ========================================================================== */
+
+$("settings-btn").addEventListener("click", () => openSettings("general"));
+$("settings-close").addEventListener("click", closeSettings);
+$("settings-reset-btn").addEventListener("click", resetSettings);
+
+// 点遮罩关闭（点内容区不关）
+$("settings-backdrop").addEventListener("click", (e) => {
+    if (e.target === $("settings-backdrop")) closeSettings();
+});
+
+// 左侧分类切换
+$("settings-nav").addEventListener("click", (e) => {
+    const btn = e.target.closest(".settings-nav-item");
+    if (btn) switchSettingsPane(btn.dataset.pane);
+});
+
+// ---- 语言：立即生效 + 持久化 ----
+$("settings-language").addEventListener("change", async (e) => {
+    currentLanguage = e.target.value === "en" ? "en" : "zh";
+    document.documentElement.lang = currentLanguage === "en" ? "en" : "zh-CN";
+    applyI18n();
+    refreshDynamicText();
+    await patchSettings("general", { language: currentLanguage });
+});
+
+// ---- 主题：立即生效 + 持久化 ----
+$("theme-picker").addEventListener("click", async (e) => {
+    const btn = e.target.closest(".theme-btn");
+    if (!btn) return;
+    applyTheme(btn.dataset.themeValue);
+    await patchSettings("general", { theme: btn.dataset.themeValue });
+});
+
+// ---- 字号：立即生效 + 持久化 ----
+$("settings-font-size").addEventListener("change", async (e) => {
+    const size = Number(e.target.value);
+    if (!Number.isFinite(size)) return;
+    document.documentElement.style.setProperty("--font-size", size + "px");
+    await patchSettings("general", { font_size: size });
+});
+
+// ---- 检索设置：既同步顶栏控件，也持久化 ----
+function bindRetrievalPair(settingsId, toolbarId, key) {
+    $(settingsId).addEventListener("change", async (e) => {
+        const value = e.target.type === "checkbox"
+            ? e.target.checked
+            : (e.target.type === "number" ? Number(e.target.value) : Number(e.target.value));
+
+        const toolbar = $(toolbarId);
+        if (toolbar) {
+            if (toolbar.type === "checkbox") toolbar.checked = value;
+            else toolbar.value = String(value);
+        }
+
+        await patchSettings("retrieval", { [key]: value });
+    });
+}
+
+bindRetrievalPair("settings-use-bm25", "use-bm25", "use_bm25");
+bindRetrievalPair("settings-use-reranker", "use-reranker", "use_reranker");
+bindRetrievalPair("settings-include-images", "include-images", "include_images");
+bindRetrievalPair("settings-top-k", "top-k", "top_k");
+bindRetrievalPair("settings-min-relevance", null, "min_relevance");
+
+// ---- 对话设置：既同步顶栏控件，也持久化 ----
+function bindChatPair(settingsId, toolbarId, key) {
+    $(settingsId).addEventListener("change", async (e) => {
+        const value = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+
+        const toolbar = $(toolbarId);
+        if (toolbar) {
+            if (toolbar.type === "checkbox") toolbar.checked = value;
+            else toolbar.value = String(value);
+        }
+
+        await patchSettings("chat", { [key]: value });
+    });
+}
+
+bindChatPair("settings-chat-mode", "answer-mode", "mode");
+bindChatPair("settings-condense", "use-condense", "condense");
+bindChatPair("settings-stream", "use-stream", "stream");
+
+/* ---- 联网搜索：三处开关联动 + 设置面板持久化 ---- */
+
+// 顶栏三个开关：点任意一个，三个一起变，并写回设置
+WEB_SWITCH_IDS.forEach((id) => {
+    const el = $(id);
+    if (el) el.addEventListener("change", (e) => setWebEnabled(e.target.checked));
+});
+
+// 设置面板里的总开关
+$("settings-web-enabled").addEventListener("change", (e) =>
+    setWebEnabled(e.target.checked)
+);
+
+// 后端切换：先落盘再刷新行的显隐（needs_key / needs_url 决定显示哪些行）
+$("settings-web-provider").addEventListener("change", async (e) => {
+    await patchWebConfig({ provider: e.target.value });
+});
+
+$("settings-web-limit").addEventListener("change", (e) =>
+    patchWebConfig({ max_results: Number(e.target.value) })
+);
+
+$("settings-web-fetch").addEventListener("change", (e) => {
+    updateWebRowsVisibility();
+    patchWebConfig({ fetch_pages: e.target.checked });
+});
+
+$("settings-web-fetch-top").addEventListener("change", (e) =>
+    patchWebConfig({ fetch_top_n: Number(e.target.value) })
+);
+
+$("settings-web-proxy").addEventListener("change", (e) =>
+    patchWebConfig({ use_proxy: e.target.checked })
+);
+
+$("settings-web-timeout").addEventListener("change", (e) =>
+    patchWebConfig({ timeout: Number(e.target.value) })
+);
+
+// Key / 地址：失焦时提交。
+// **Key 为空就不提交 api_key 字段** —— 否则会用空串把已保存的真 Key 冲掉。
+$("settings-web-key").addEventListener("change", (e) => {
+    const value = e.target.value.trim();
+    if (!value) return;
+    patchWebConfig({ api_key: value }).then(() => {
+        e.target.value = "";
+    });
+});
+
+$("settings-web-url").addEventListener("change", (e) =>
+    patchWebConfig({ searxng_url: e.target.value.trim() })
+);
+
+$("settings-web-test-btn").addEventListener("click", testWebConnection);
+$("settings-web-check-btn").addEventListener("click", testWebConnection);
+$("settings-web-clear-btn").addEventListener("click", clearWebConfig);
+
+// 顶栏控件改动时反向写回设置面板，避免两边显示不一致
+["use-bm25", "use-reranker", "include-images", "use-condense", "use-stream"].forEach((id) => {
+    const el = $(id);
+    if (el) el.addEventListener("change", syncToolbarToSettings);
+});
+$("top-k").addEventListener("change", syncToolbarToSettings);
+$("answer-mode").addEventListener("change", syncToolbarToSettings);
+
+function syncToolbarToSettings() {
+    const map = [
+        ["use-bm25", "settings-use-bm25"],
+        ["use-reranker", "settings-use-reranker"],
+        ["include-images", "settings-include-images"],
+        ["use-condense", "settings-condense"],
+        ["use-stream", "settings-stream"],
+        ["top-k", "settings-top-k"],
+        ["answer-mode", "settings-chat-mode"],
+    ];
+
+    map.forEach(([from, to]) => {
+        const src = $(from);
+        const dst = $(to);
+        if (!src || !dst) return;
+        if (src.type === "checkbox") dst.checked = src.checked;
+        else dst.value = src.value;
+    });
+}
+
+// 设置面板里的模型下拉：切换走同一个 switchModel
+$("settings-model-select").addEventListener("change", (e) => {
+    switchModel(e.target.value);
+});
+
+$("usage-reset-btn").addEventListener("click", resetUsage);
+
+/**
+ * 语言切换后重渲染那些「由 JS 生成」的内容。
+ *
+ * 静态文案由 applyI18n() 直接改写；但会话列表、文档清单、顶栏胶囊、
+ * 用量表格都是 JS 拼出来的 HTML，必须重新生成一次才会套用新语言。
+ *
+ * 文档名、模型名、对话内容属于数据，本来就不翻译，因此重渲染不会影响它们。
+ */
+function refreshDynamicText() {
+    renderConversations();
+    renderUsage(settingsState.usage);
+    renderAbout();
+    updateSettingsHints();
+    loadDocuments();
+    refreshHealth(true);
+    if (typeof renderStats === "function") { /* 统计标签在下次检索时刷新 */ }
+}
+
+// 初始化
+(async function init() {
+    // 设置要最先加载：语言 / 主题 / 字号会影响后续所有渲染
+    await loadSettings();
+    // 联网配置要早于 switchMode —— 三个「联网」开关的初始勾选状态由它决定
+    await loadWebConfig();
+
+    switchMode("search");
+    await refreshHealth(true);
+    await loadProviders();
+    loadModels();
+    loadDocuments();
+    // 只加载会话列表，**不自动打开上次的会话** —— 默认新对话更符合直觉
+    loadConversations();
+
+    // 系统主题变化时，若选了「跟随系统」需要实时跟随
+    watchSystemTheme();
+
+    // 若后台已在建索引，同步按钮状态并开始轮询。
+    // 此时无从得知是「构建」还是「重建」，因此 indexRebuild 保持 null，
+    // 文案走通用的「后台正在构建索引…」，不显示会误导的 chunk 计数。
+    try {
+        const s = await api("/api/index/status");
+        if (s.indexing) {
+            setIndexButtons(true);
+            state.indexRebuild = null;
+            state.indexStartedAt = Date.now();
+            showIndexProgress(indexProgressMessage(), true);
+            startIndexTicker();
+            startIndexPolling();
+        } else if (s.last_error) {
+            showIndexProgress("最近一次索引失败：" + s.last_error);
+        }
+    } catch (_) { /* 忽略 */ }
+})();
+
+/* =====================================================================
+   背景粒子星链
+   ---------------------------------------------------------------------
+   缓慢漂移的光点 + 邻近连线，给界面一点氛围。
+
+   几个刻意的取舍：
+   - 密度**低**才好看。点一多就从「氛围」变成「干扰」，所以按面积算
+     节点数并设上限，宁可稀疏。
+   - 用平方距离比较，避免每对点都开方。
+   - 尊重 prefers-reduced-motion：只画一帧静态星图，不产生运动。
+   - 页面切到后台时停掉 rAF，不空转。
+   - 主题切换时换色（监听 data-theme），浅色下用深色粒子。
+   ===================================================================== */
+(function initBackground() {
+    const canvas = document.getElementById("bg-canvas");
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const mqReduce = window.matchMedia
+        ? window.matchMedia("(prefers-reduced-motion: reduce)")
+        : null;
+    let reduceMotion = !!(mqReduce && mqReduce.matches);
+
+    // 每个主题一套 RGB，分别给普通点 / 亮点 / 连线
+    const PALETTE = {
+        dark: {
+            node:   [168, 196, 232],
+            bright: [228, 241, 255],
+            line:   [104, 158, 206],
+        },
+        light: {
+            node:   [108, 136, 174],
+            bright: [ 40,  78, 126],
+            line:   [122, 158, 200],
+        },
+    };
+
+    const LINK_DIST = 168;      // 超过这个距离不连线
+    const AREA_PER_NODE = 26000; // 每个点占多少平方像素（越大越稀疏）
+    const MAX_NODES = 110;
+    const MIN_NODES = 18;
+
+    let width = 0;
+    let height = 0;
+    let nodes = [];
+    let palette = PALETTE.dark;
+    let rafId = null;
+    let running = false;
+    let resizeTimer = null;
+
+    function readPalette() {
+        palette =
+            document.documentElement.dataset.theme === "light"
+                ? PALETTE.light
+                : PALETTE.dark;
+    }
+
+    function makeNode() {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 0.06 + Math.random() * 0.2;
+
+        return {
+            x: Math.random() * width,
+            y: Math.random() * height,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            r: 0.9 + Math.random() * 1.4,
+            // 少数点更亮更大，形成层次感
+            bright: Math.random() < 0.16,
+            alpha: 0.3 + Math.random() * 0.45,
+            // 缓慢呼吸，幅度很小，只为让画面是「活的」
+            phase: Math.random() * Math.PI * 2,
+            phaseSpeed: 0.004 + Math.random() * 0.008,
+        };
+    }
+
+    function rebuild() {
+        const byArea = Math.round((width * height) / AREA_PER_NODE);
+        const count = Math.max(MIN_NODES, Math.min(MAX_NODES, byArea));
+        nodes = [];
+        for (let i = 0; i < count; i++) nodes.push(makeNode());
+    }
+
+    function resize() {
+        // DPR 上限 2：再高对这点细节没意义，只是白烧 GPU
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+        width = canvas.clientWidth || window.innerWidth;
+        height = canvas.clientHeight || window.innerHeight;
+
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+
+        // 之后都用 CSS 像素坐标绘制
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        rebuild();
+        render();
+    }
+
+    function step() {
+        for (const n of nodes) {
+            n.x += n.vx;
+            n.y += n.vy;
+
+            // 环绕而不是反弹，避免在边缘堆积
+            if (n.x < -24) n.x = width + 24;
+            else if (n.x > width + 24) n.x = -24;
+            if (n.y < -24) n.y = height + 24;
+            else if (n.y > height + 24) n.y = -24;
+
+            n.phase += n.phaseSpeed;
+        }
+    }
+
+    function drawLinks() {
+        const [lr, lg, lb] = palette.line;
+        const max2 = LINK_DIST * LINK_DIST;
+
+        ctx.lineWidth = 1;
+
+        for (let i = 0; i < nodes.length; i++) {
+            const a = nodes[i];
+
+            for (let j = i + 1; j < nodes.length; j++) {
+                const b = nodes[j];
+                const dx = a.x - b.x;
+                const dy = a.y - b.y;
+                const d2 = dx * dx + dy * dy;
+
+                if (d2 > max2) continue;
+
+                const t = 1 - Math.sqrt(d2) / LINK_DIST;
+                ctx.strokeStyle =
+                    "rgba(" + lr + "," + lg + "," + lb + "," +
+                    (t * 0.38).toFixed(3) + ")";
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+                ctx.stroke();
+            }
+        }
+    }
+
+    function drawNodes() {
+        const [nr, ng, nb] = palette.node;
+        const [br, bg, bb] = palette.bright;
+
+        for (const n of nodes) {
+            const breathe = 1 + Math.sin(n.phase) * 0.18;
+            const radius = n.bright ? n.r * 1.45 : n.r;
+            const alpha = Math.max(0.08, Math.min(1, n.alpha * breathe));
+
+            if (n.bright) {
+                // 亮点带一圈柔光，视觉上更像「星」
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, radius * 3.4, 0, Math.PI * 2);
+                ctx.fillStyle =
+                    "rgba(" + br + "," + bg + "," + bb + ",0.07)";
+                ctx.fill();
+            }
+
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = n.bright
+                ? "rgba(" + br + "," + bg + "," + bb + "," +
+                  Math.min(1, alpha + 0.25).toFixed(3) + ")"
+                : "rgba(" + nr + "," + ng + "," + nb + "," +
+                  alpha.toFixed(3) + ")";
+            ctx.fill();
+        }
+    }
+
+    function render() {
+        ctx.clearRect(0, 0, width, height);
+        drawLinks();
+        drawNodes();
+    }
+
+    function frame() {
+        if (!running) return;
+        step();
+        render();
+        rafId = requestAnimationFrame(frame);
+    }
+
+    function start() {
+        if (running || reduceMotion) return;
+        running = true;
+        rafId = requestAnimationFrame(frame);
+    }
+
+    function stop() {
+        running = false;
+        if (rafId !== null) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
+    }
+
+    window.addEventListener("resize", function () {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(resize, 180);
+    });
+
+    document.addEventListener("visibilitychange", function () {
+        if (document.hidden) stop();
+        else start();
+    });
+
+    // 主题切换换色
+    if (window.MutationObserver) {
+        new MutationObserver(function () {
+            readPalette();
+            render();
+        }).observe(document.documentElement, {
+            attributes: true,
+            attributeFilter: ["data-theme"],
+        });
+    }
+
+    // 用户在系统层面开启「减少动效」时实时响应
+    if (mqReduce && mqReduce.addEventListener) {
+        mqReduce.addEventListener("change", function (e) {
+            reduceMotion = e.matches;
+            if (reduceMotion) {
+                stop();
+                render();
+            } else {
+                start();
+            }
+        });
+    }
+
+    readPalette();
+    resize();
+    start();
+})();
+</script>
+</body>
+</html>
